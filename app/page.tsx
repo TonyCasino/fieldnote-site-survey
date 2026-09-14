@@ -1,9 +1,10 @@
 "use client";
+import "./walkthrough.css";
 
 import { useRef, useState } from "react";
 import { Camera, Check, ChevronLeft, Cloud, FolderOpen, ImagePlus, MapPin, PenLine, Plus, Share2, Upload } from "lucide-react";
 
-type Photo = { id: string; name: string; url: string };
+type Photo = { id: string; name: string; url: string; file: File };
 type Station = { id: string; name: string; notes: string; photos: Photo[] };
 const id = () => Math.random().toString(36).slice(2, 9);
 
@@ -14,6 +15,7 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
   const [active, setActive] = useState("");
   const [stations, setStations] = useState<Station[]>([]);
+  const [completed, setCompleted] = useState(false);
   const photoInput = useRef<HTMLInputElement>(null);
   const current = stations.find((station) => station.id === active);
   const totalPhotos = stations.reduce((total, station) => total + station.photos.length, 0);
@@ -29,7 +31,7 @@ export default function Home() {
   };
   const addPhotos = (files: FileList | null) => {
     if (!files || !active) return;
-    const photos = Array.from(files).filter((file) => file.type.startsWith("image/")).map((file) => ({ id: id(), name: file.name, url: URL.createObjectURL(file) }));
+    const photos = Array.from(files).filter((file) => file.type.startsWith("image/")).map((file) => ({ id: id(), name: file.name, url: URL.createObjectURL(file), file }));
     setStations(stations.map((station) => station.id === active ? { ...station, photos: [...station.photos, ...photos] } : station));
   };
   const setNotes = (notes: string) => setStations(stations.map((station) => station.id === active ? { ...station, notes } : station));
@@ -45,13 +47,14 @@ export default function Home() {
 
   return <div className="app-shell">
     <aside className="rail"><Brand/><button className="new-survey" onClick={() => { setSurveyName(""); setStations([]); }}><Plus size={18}/>New survey</button><div className="nav-title">WALK-THROUGH</div><button className="nav-item selected"><FolderOpen size={18}/>{surveyName}</button><div className="station-list">{stations.map((station, index) => <button key={station.id} className={station.id === active ? "station active" : "station"} onClick={() => setActive(station.id)}><span>{String(index + 1).padStart(2, "0")}</span>{station.name || "Name this station"}<small>{station.photos.length}</small></button>)}</div><div className="onedrive"><Cloud size={20}/><div><b>{connected ? "Connected to OneDrive" : "Offline workspace"}</b><p>{connected ? "Ready to upload" : "Connect when you’re ready"}</p></div></div></aside>
-    <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? "OneDrive connected" : "Saved on this device"}</span><button className="outline" onClick={() => setConnected(true)}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" disabled={!connected}><Share2 size={17}/>Complete & share</button></div></header>
+    <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? "OneDrive connected" : "Saved on this device"}</span><button className="outline" onClick={() => setConnected(true)}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" onClick={() => setCompleted(true)}><Share2 size={17}/>Complete & share</button></div></header>
       <section className="station-area"><div className="station-title"><div><div className="eyebrow">STATION {String(stations.findIndex((station) => station.id === active) + 1).padStart(2, "0")}</div><label className="station-name-label" htmlFor="station-name">Where are you?</label><input key={active} autoFocus id="station-name" className="station-name" value={current?.name ?? ""} onChange={(event) => setStationName(event.target.value)} placeholder="Type the station name"/></div><span>{current?.photos.length ?? 0} photos</span></div>
       <div className="capture-card"><div><Camera size={26}/><div><h3>Capture the condition</h3><p>Use your camera or add photos from this device. Originals stay with this station.</p></div></div><button className="primary" onClick={() => photoInput.current?.click()}><Camera size={18}/>Add photos</button><input ref={photoInput} type="file" accept="image/*" capture="environment" multiple onChange={(event) => addPhotos(event.target.files)}/></div>
       <div className="photo-grid">{current?.photos.map((photo) => <article className="photo" key={photo.id}><img src={photo.url} alt={photo.name}/><div><span>{photo.name}</span><button title="Photo markup will be available in review"><PenLine size={16}/></button></div></article>)}{!current?.photos.length && <div className="photo-empty"><ImagePlus size={27}/><span>Photos added here will be organized in<br/><b>{surveyName} / {current?.name}</b></span></div>}</div>
       <div className="notes"><label htmlFor="notes">Field notes <small>optional</small></label><textarea id="notes" value={current?.notes ?? ""} onChange={(event) => setNotes(event.target.value)} placeholder="Add observations, measurements, or follow-up items…"/><span>Notes are saved as you type.</span></div><button className="next-station" onClick={nextStation}><span><Check size={18}/></span><div><b>Next station</b><small>Save this station and move on</small></div><Plus size={20}/></button></section>
     </main>
     <aside className="station-tools"><h3>Walk-through progress</h3><p>Name the station, add every photo you need, then use Next station.</p><div className="progress-number"><b>{stations.length}</b><span>stations visited</span></div><div className="tool-note"><Upload size={18}/><span><b>Upload queue</b><br/>{totalPhotos ? `${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} ready to upload` : "No photos yet"}</span></div></aside>
+    {completed && <div className="completion-backdrop" role="dialog" aria-modal="true" aria-labelledby="complete-title"><section className="completion"><button className="completion-close" onClick={() => setCompleted(false)}>×</button><div className="complete-check"><Check size={25}/></div><div className="eyebrow">SURVEY READY</div><h2 id="complete-title">Your OneDrive folders</h2><p>Completing this survey creates this exact structure. Every station keeps its own pictures and field notes together.</p><div className="folder-tree"><b><FolderOpen size={18}/>{surveyName}</b>{stations.map((station, index) => <div key={station.id}><strong><FolderOpen size={17}/>{station.name.trim() || `Station ${index + 1}`}</strong>{station.photos.map((photo) => <span key={photo.id}><ImagePlus size={15}/>{photo.name}</span>)}<span><PenLine size={15}/>Notes.txt</span></div>)}</div>{connected ? <button className="primary complete-action"><Cloud size={18}/>Upload survey to OneDrive</button> : <><button className="primary complete-action" onClick={() => setConnected(true)}><Cloud size={18}/>Sign in with Microsoft to upload</button><small className="complete-help">The Microsoft connection will use your work account and upload into your OneDrive.</small></>}</section></div>}
   </div>;
 }
 function Brand() { return <a className="brand" href="#"><span><MapPin size={21}/></span>fieldnote<i>.</i></a>; }
