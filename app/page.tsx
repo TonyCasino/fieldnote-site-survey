@@ -30,6 +30,7 @@ export default function Home() {
   const [uploaded, setUploaded] = useState<{ folderUrl: string; shareUrl: string } | null>(null);
   const [editingPhoto, setEditingPhoto] = useState<Photo | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
+  const openedLink = useRef(false);
   const current = stations.find((station) => station.id === active);
   const totalPhotos = stations.reduce((total, station) => total + station.photos.length, 0);
   const connected = Boolean(account);
@@ -38,6 +39,21 @@ export default function Home() {
     currentMicrosoftAccount().then((value) => { setAccount(value); if (value) listOneDriveProjects(value).then(setCloudProjects).catch(() => undefined); }).catch(() => undefined);
     listProjects().then(setSavedProjects).catch(() => undefined);
   }, []);
+  useEffect(() => {
+    const linkedId = new URLSearchParams(window.location.search).get("project");
+    if (!account || !linkedId || openedLink.current) return;
+    openedLink.current = true; setCloudStatus("Opening project from OneDrive…");
+    (async () => {
+      try {
+        const projects = await listOneDriveProjects(account), summary = projects.find((project) => project.id === linkedId);
+        if (!summary) throw new Error("This Fieldnote project was not found in your OneDrive.");
+        const loaded = await loadOneDriveProject(account, summary);
+        const restored = loaded.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => ({ ...photo, url: URL.createObjectURL(photo.file) })) }));
+        setCloudProjects(projects); setProjectId(loaded.id); setSurveyName(loaded.name); setStations(restored); setActive(loaded.activeStationId || restored[0]?.id || ""); setCloudStatus("Saved to OneDrive");
+        window.history.replaceState({}, "", window.location.pathname);
+      } catch (error) { setCloudStatus(error instanceof Error ? error.message : "The linked project could not be opened."); }
+    })();
+  }, [account]);
   useEffect(() => {
     if (!projectId || !surveyName || !stations.length) return;
     const timer = window.setTimeout(async () => {
@@ -67,7 +83,7 @@ export default function Home() {
   const uploadSurvey = async () => {
     if (!account) { await connectMicrosoft(); return; }
     setUploadError(""); setUploadStatus("Preparing your OneDrive folders…");
-    try { setUploaded(await uploadSurveyToOneDrive(account, surveyName, stations, setUploadStatus)); setUploadStatus(""); }
+    try { setUploaded(await uploadSurveyToOneDrive(account, surveyName, stations, setUploadStatus, projectId)); setUploadStatus(""); }
     catch (error) { setUploadStatus(""); setUploadError(error instanceof Error ? error.message : "The OneDrive upload could not be completed."); }
   };
 

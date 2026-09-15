@@ -87,6 +87,12 @@ export type CloudProjectSummary = { id: string; name: string; updatedAt: number;
 type SyncProject = { id: string; name: string; activeStationId: string; updatedAt: number; stations: Array<{ id: string; name: string; notes: string; photos: Array<{ id: string; name: string; file: File; originalName: string; originalFile: File }> }> };
 
 const savedRootName = "Fieldnote Saved Projects";
+const fieldnoteUrl = "https://fieldnote-site-survey.nick-templeton-work.chatgpt.site";
+
+async function uploadProjectShortcut(token: string, folderId: string, projectId: string) {
+  const shortcut = `[InternetShortcut]\r\nURL=${fieldnoteUrl}/?project=${encodeURIComponent(projectId)}\r\n`;
+  await graph(token, `/me/drive/items/${folderId}:/${encodeURIComponent("Open in Fieldnote.url")}:/content`, { method: "PUT", headers: { "Content-Type": "application/internet-shortcut" }, body: shortcut });
+}
 
 export async function syncProjectToOneDrive(account: AccountInfo, project: SyncProject) {
   const token = await accessToken(account);
@@ -110,6 +116,7 @@ export async function syncProjectToOneDrive(account: AccountInfo, project: SyncP
     manifest.stations.push({ id: station.id, name: station.name, notes: station.notes, photos: savedPhotos });
   }
   await graph(token, `/me/drive/items/${folder.id}:/project.json:/content`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(manifest) });
+  await uploadProjectShortcut(token, folder.id, project.id);
 }
 
 export async function listOneDriveProjects(account: AccountInfo): Promise<CloudProjectSummary[]> {
@@ -146,7 +153,7 @@ export async function loadOneDriveProject(account: AccountInfo, summary: CloudPr
   return data as SyncProject;
 }
 
-export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: string, stations: UploadStation[], onProgress: (message: string) => void) {
+export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: string, stations: UploadStation[], onProgress: (message: string) => void, projectId?: string) {
   const token = await accessToken(account);
   const root = await createFolder(token, "/me/drive/root/children", cleanName(surveyName, "Site Survey"));
   for (let index = 0; index < stations.length; index++) {
@@ -176,6 +183,7 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     });
   }
   onProgress("Creating sharing link…");
+  if (projectId) await uploadProjectShortcut(token, root.id, projectId);
   const share = await graph(token, `/me/drive/items/${root.id}/createLink`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "view", scope: "organization" }),
   });
