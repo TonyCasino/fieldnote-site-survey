@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AccountInfo } from "@azure/msal-browser";
 import { Camera, Check, ChevronLeft, Cloud, FolderOpen, ImagePlus, MapPin, PenLine, Plus, Share2, Upload } from "lucide-react";
 import { currentMicrosoftAccount, signInMicrosoft, uploadSurveyToOneDrive } from "./microsoft";
+import PhotoAnnotator from "./PhotoAnnotator";
 
 type Photo = { id: string; name: string; url: string; file: File };
 type Station = { id: string; name: string; notes: string; photos: Photo[] };
@@ -22,6 +23,7 @@ export default function Home() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [uploadError, setUploadError] = useState("");
   const [uploaded, setUploaded] = useState<{ folderUrl: string; shareUrl: string } | null>(null);
+  const [editingPhoto, setEditingPhoto] = useState<Photo | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
   const current = stations.find((station) => station.id === active);
   const totalPhotos = stations.reduce((total, station) => total + station.photos.length, 0);
@@ -58,6 +60,12 @@ export default function Home() {
   };
   const setNotes = (notes: string) => setStations(stations.map((station) => station.id === active ? { ...station, notes } : station));
   const setStationName = (name: string) => setStations(stations.map((station) => station.id === active ? { ...station, name } : station));
+  const saveAnnotatedPhoto = (file: File, url: string) => {
+    if (!editingPhoto) return;
+    URL.revokeObjectURL(editingPhoto.url);
+    setStations(stations.map((station) => ({ ...station, photos: station.photos.map((photo) => photo.id === editingPhoto.id ? { ...photo, name: file.name, file, url } : photo) })));
+    setEditingPhoto(null);
+  };
 
   if (!surveyName) return <div className="start">
     <header className="start-header"><Brand/><button className="connect" onClick={connectMicrosoft}><Cloud size={17}/>{connected ? account?.username : "Sign in with Microsoft"}</button></header>
@@ -72,10 +80,11 @@ export default function Home() {
     <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? "OneDrive connected" : "Saved on this device"}</span><button className="outline" onClick={connectMicrosoft}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" onClick={() => setCompleted(true)}><Share2 size={17}/>Complete & share</button></div></header>
       <section className="station-area"><div className="station-title"><div><div className="eyebrow">STATION {String(stations.findIndex((station) => station.id === active) + 1).padStart(2, "0")}</div><label className="station-name-label" htmlFor="station-name">Where are you?</label><input key={active} autoFocus id="station-name" className="station-name" value={current?.name ?? ""} onChange={(event) => setStationName(event.target.value)} placeholder="Type the station name"/></div><span>{current?.photos.length ?? 0} photos</span></div>
       <div className="capture-card"><div><Camera size={26}/><div><h3>Capture the condition</h3><p>Use your camera or add photos from this device. Originals stay with this station.</p></div></div><button className="primary" onClick={() => photoInput.current?.click()}><Camera size={18}/>Add photos</button><input ref={photoInput} type="file" accept="image/*" capture="environment" multiple onChange={(event) => addPhotos(event.target.files)}/></div>
-      <div className="photo-grid">{current?.photos.map((photo) => <article className="photo" key={photo.id}><img src={photo.url} alt={photo.name}/><div><span>{photo.name}</span><button title="Photo markup will be available in review"><PenLine size={16}/></button></div></article>)}{!current?.photos.length && <div className="photo-empty"><ImagePlus size={27}/><span>Photos added here will be organized in<br/><b>{surveyName} / {current?.name}</b></span></div>}</div>
+      <div className="photo-grid">{current?.photos.map((photo) => <article className="photo" key={photo.id}><button className="photo-preview" onClick={() => setEditingPhoto(photo)}><img src={photo.url} alt={photo.name}/><span><PenLine size={15}/>Annotate</span></button><div><span>{photo.name}</span><button aria-label={`Annotate ${photo.name}`} title="Add measurements" onClick={() => setEditingPhoto(photo)}><PenLine size={16}/></button></div></article>)}{!current?.photos.length && <div className="photo-empty"><ImagePlus size={27}/><span>Photos added here will be organized in<br/><b>{surveyName} / {current?.name}</b></span></div>}</div>
       <div className="notes"><label htmlFor="notes">Field notes <small>optional</small></label><textarea id="notes" value={current?.notes ?? ""} onChange={(event) => setNotes(event.target.value)} placeholder="Add observations, measurements, or follow-up items…"/><span>Notes are saved as you type.</span></div><button className="next-station" onClick={nextStation}><span><Check size={18}/></span><div><b>Next station</b><small>Save this station and move on</small></div><Plus size={20}/></button></section>
     </main>
     <aside className="station-tools"><h3>Walk-through progress</h3><p>Name the station, add every photo you need, then use Next station.</p><div className="progress-number"><b>{stations.length}</b><span>stations visited</span></div><div className="tool-note"><Upload size={18}/><span><b>Upload queue</b><br/>{totalPhotos ? `${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} ready to upload` : "No photos yet"}</span></div></aside>
+    {editingPhoto && <PhotoAnnotator photoUrl={editingPhoto.url} photoName={editingPhoto.name} onCancel={() => setEditingPhoto(null)} onSave={saveAnnotatedPhoto}/>} 
     {completed && <div className="completion-backdrop" role="dialog" aria-modal="true" aria-labelledby="complete-title"><section className="completion"><button className="completion-close" onClick={() => setCompleted(false)}>×</button><div className="complete-check"><Check size={25}/></div><div className="eyebrow">SURVEY READY</div><h2 id="complete-title">Your OneDrive folders</h2><p>Completing this survey creates this exact structure. Every station keeps its own pictures and field notes together.</p><div className="folder-tree"><b><FolderOpen size={18}/>{surveyName}</b>{stations.map((station, index) => <div key={station.id}><strong><FolderOpen size={17}/>{station.name.trim() || `Station ${index + 1}`}</strong>{station.photos.map((photo) => <span key={photo.id}><ImagePlus size={15}/>{photo.name}</span>)}<span><PenLine size={15}/>Notes.txt</span></div>)}</div>{uploaded ? <div className="upload-success"><Check size={20}/><b>Survey uploaded</b><a href={uploaded.folderUrl} target="_blank" rel="noreferrer">Open folder in OneDrive</a><button onClick={() => navigator.clipboard.writeText(uploaded.shareUrl)}><Share2 size={16}/>Copy team sharing link</button></div> : <button className="primary complete-action" disabled={Boolean(uploadStatus)} onClick={uploadSurvey}><Cloud size={18}/>{uploadStatus || (connected ? "Upload survey to OneDrive" : "Sign in with Microsoft to upload")}</button>}{uploadError && <p className="upload-error" role="alert">{uploadError}</p>}<small className="complete-help">{connected ? `Connected as ${account?.username}` : "Microsoft will ask you to approve access to files in your OneDrive."}</small></section></div>}
   </div>;
 }
