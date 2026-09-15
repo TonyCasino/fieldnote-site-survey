@@ -5,7 +5,7 @@ import "./microsoft.css";
 import { useEffect, useRef, useState } from "react";
 import type { AccountInfo } from "@azure/msal-browser";
 import { Camera, Check, ChevronLeft, Cloud, FolderOpen, ImagePlus, MapPin, PenLine, Plus, Share2, Trash2, Upload } from "lucide-react";
-import { currentMicrosoftAccount, signInMicrosoft, uploadSurveyToOneDrive } from "./microsoft";
+import { currentMicrosoftAccount, listOneDriveProjects, loadOneDriveProject, signInMicrosoft, syncProjectToOneDrive, uploadSurveyToOneDrive, type CloudProjectSummary } from "./microsoft";
 import PhotoAnnotator from "./PhotoAnnotator";
 import { deleteProject, listProjects, saveProject, type StoredProject } from "./projectStorage";
 
@@ -17,6 +17,8 @@ export default function Home() {
   const [surveyName, setSurveyName] = useState("");
   const [projectId, setProjectId] = useState("");
   const [savedProjects, setSavedProjects] = useState<StoredProject[]>([]);
+  const [cloudProjects, setCloudProjects] = useState<CloudProjectSummary[]>([]);
+  const [cloudStatus, setCloudStatus] = useState("");
   const [draftName, setDraftName] = useState("");
   const [creating, setCreating] = useState(false);
   const [account, setAccount] = useState<AccountInfo | null>(null);
@@ -33,7 +35,7 @@ export default function Home() {
   const connected = Boolean(account);
 
   useEffect(() => {
-    currentMicrosoftAccount().then(setAccount).catch(() => undefined);
+    currentMicrosoftAccount().then((value) => { setAccount(value); if (value) listOneDriveProjects(value).then(setCloudProjects).catch(() => undefined); }).catch(() => undefined);
     listProjects().then(setSavedProjects).catch(() => undefined);
   }, []);
   useEffect(() => {
@@ -44,10 +46,21 @@ export default function Home() {
     }, 350);
     return () => window.clearTimeout(timer);
   }, [projectId, surveyName, active, stations]);
+  useEffect(() => {
+    if (!account || !projectId || !surveyName || !stations.length) return;
+    const timer = window.setTimeout(async () => {
+      setCloudStatus("Syncing to OneDrive…");
+      try {
+        await syncProjectToOneDrive(account, { id: projectId, name: surveyName, activeStationId: active, stations, updatedAt: Date.now() });
+        setCloudStatus("Saved to OneDrive");
+      } catch { setCloudStatus("OneDrive sync paused"); }
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [account, projectId, surveyName, active, stations]);
 
   const connectMicrosoft = async () => {
     setUploadError("");
-    try { setAccount(await signInMicrosoft()); }
+    try { const signedIn = await signInMicrosoft(); setAccount(signedIn); setCloudProjects(await listOneDriveProjects(signedIn)); }
     catch (error) { setUploadError(error instanceof Error ? error.message : "Microsoft sign-in did not finish."); }
   };
 
@@ -66,6 +79,15 @@ export default function Home() {
   const openProject = (project: StoredProject) => {
     const restored = project.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => ({ ...photo, url: URL.createObjectURL(photo.file) })) }));
     setProjectId(project.id); setSurveyName(project.name); setStations(restored); setActive(project.activeStationId || restored[0]?.id || ""); setUploaded(null);
+  };
+  const openCloudProject = async (project: CloudProjectSummary) => {
+    if (!account) return;
+    setCloudStatus("Opening from OneDrive…");
+    try {
+      const loaded = await loadOneDriveProject(account, project);
+      const restored = loaded.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => ({ ...photo, url: URL.createObjectURL(photo.file) })) }));
+      setProjectId(loaded.id); setSurveyName(loaded.name); setStations(restored); setActive(loaded.activeStationId || restored[0]?.id || ""); setCloudStatus("Saved to OneDrive");
+    } catch (error) { setCloudStatus(error instanceof Error ? error.message : "The project could not be opened."); }
   };
   const removeProject = async (project: StoredProject) => { await deleteProject(project.id); setSavedProjects(await listProjects()); };
   const nextStation = () => {
@@ -91,13 +113,15 @@ export default function Home() {
     <main><div className="eyebrow">SITE SURVEY TOOL</div><h1>Document the site<br/><em>while you’re there.</em></h1><p className="lead">Capture photos by station, add field notes, then send a clean, organized survey to OneDrive.</p>
       {creating ? <form className="create-box" onSubmit={(event) => { event.preventDefault(); createSurvey(); }}><label htmlFor="site">What site are you surveying?</label><input autoFocus id="site" value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="e.g. Northside Warehouse"/><div><button type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary" type="submit">Create survey <Plus size={17}/></button></div></form> : <button className="primary large" onClick={() => setCreating(true)}><Plus size={18}/>Start a site survey</button>}
       {savedProjects.length > 0 && <section className="saved-projects"><div><b>Saved projects</b><span>Reopen a survey and keep working.</span></div>{savedProjects.map((project) => <article key={project.id}><button className="saved-open" onClick={() => openProject(project)}><FolderOpen size={20}/><span><b>{project.name}</b><small>{project.stations.length} stations · {project.stations.reduce((sum, station) => sum + station.photos.length, 0)} photos · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button><button className="saved-delete" aria-label={`Delete ${project.name}`} onClick={() => removeProject(project)}><Trash2 size={17}/></button></article>)}</section>}
+      {connected && cloudProjects.some((project) => !savedProjects.some((local) => local.id === project.id)) && <section className="saved-projects cloud-projects"><div><b>From OneDrive</b><span>Projects saved on your other devices.</span></div>{cloudProjects.filter((project) => !savedProjects.some((local) => local.id === project.id)).map((project) => <article key={project.id}><button className="saved-open" onClick={() => openCloudProject(project)}><Cloud size={20}/><span><b>{project.name}</b><small>{project.stationCount} stations · {project.photoCount} photos · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button></article>)}</section>}
+      {cloudStatus && !surveyName && <p className="cloud-home-status">{cloudStatus}</p>}
       <div className="promise"><span><Check size={17}/>Works on your phone</span><span><Check size={17}/>Original photos preserved</span><span><Check size={17}/>Ready for OneDrive</span></div>
     </main><footer><span>Built for the walk-through.</span><span>iPhone · Android · Desktop</span></footer>
   </div>;
 
   return <div className="app-shell">
     <aside className="rail"><Brand/><button className="new-survey" onClick={() => { setProjectId(""); setSurveyName(""); setStations([]); }}><Plus size={18}/>New survey</button><div className="nav-title">WALK-THROUGH</div><button className="nav-item selected"><FolderOpen size={18}/>{surveyName}</button><div className="station-list">{stations.map((station, index) => <button key={station.id} className={station.id === active ? "station active" : "station"} onClick={() => setActive(station.id)}><span>{String(index + 1).padStart(2, "0")}</span>{station.name || "Name this station"}<small>{station.photos.length}</small></button>)}</div><div className="onedrive"><Cloud size={20}/><div><b>{connected ? "Connected to OneDrive" : "Offline workspace"}</b><p>{connected ? "Ready to upload" : "Connect when you’re ready"}</p></div></div></aside>
-    <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? "OneDrive connected" : "Saved on this device"}</span><button className="outline" onClick={connectMicrosoft}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" onClick={() => setCompleted(true)}><Share2 size={17}/>Complete & share</button></div></header>
+    <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? cloudStatus || "Saved to OneDrive" : "Saved on this device"}</span><button className="outline" onClick={connectMicrosoft}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" onClick={() => setCompleted(true)}><Share2 size={17}/>Complete & share</button></div></header>
       <section className="station-area"><div className="station-title"><div><div className="eyebrow">STATION {String(stations.findIndex((station) => station.id === active) + 1).padStart(2, "0")}</div><label className="station-name-label" htmlFor="station-name">Where are you?</label><input key={active} autoFocus id="station-name" className="station-name" value={current?.name ?? ""} onChange={(event) => setStationName(event.target.value)} placeholder="Type the station name"/></div><span>{current?.photos.length ?? 0} photos</span></div>
       <div className="capture-card"><div><Camera size={26}/><div><h3>Capture the condition</h3><p>Use your camera or add photos from this device. Originals stay with this station.</p></div></div><button className="primary" onClick={() => photoInput.current?.click()}><Camera size={18}/>Add photos</button><input ref={photoInput} type="file" accept="image/*" capture="environment" multiple onChange={(event) => addPhotos(event.target.files)}/></div>
       <div className="photo-grid">{current?.photos.map((photo, photoIndex) => { const displayName = numberedPhotoName(current.name, photoIndex, photo.file !== photo.originalFile); return <article className="photo" key={photo.id}><button className="photo-preview" onClick={() => setEditingPhoto({ ...photo, name: numberedPhotoName(current.name, photoIndex, false) })}><img src={photo.url} alt={displayName}/><span><PenLine size={15}/>Annotate</span></button><div><span>{displayName}</span><button aria-label={`Annotate ${displayName}`} title="Add measurements" onClick={() => setEditingPhoto({ ...photo, name: numberedPhotoName(current.name, photoIndex, false) })}><PenLine size={16}/></button></div></article>; })}{!current?.photos.length && <div className="photo-empty"><ImagePlus size={27}/><span>Photos added here will be organized in<br/><b>{surveyName} / {current?.name}</b></span></div>}</div>
@@ -110,5 +134,6 @@ export default function Home() {
 }
 function Brand() { return <a className="brand" href="#"><span><MapPin size={21}/></span>fieldnote<i>.</i></a>; }
 function numberedPhotoName(stationName: string, index: number, annotated: boolean) { return `${stationName.trim() || "Station"} ${String(index + 1).padStart(2, "0")}${annotated ? " - Annotated" : ""}.jpg`; }
+
 
 

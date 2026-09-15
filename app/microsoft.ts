@@ -63,6 +63,17 @@ async function graph(token: string, path: string, init: RequestInit) {
   return response.json();
 }
 
+async function graphResponse(token: string, path: string, init: RequestInit = {}) {
+  return fetch(`https://graph.microsoft.com/v1.0${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) } });
+}
+
+async function ensureFolder(token: string, path: string, parentPath: string, name: string) {
+  const existing = await graphResponse(token, path);
+  if (existing.ok) return existing.json();
+  if (existing.status !== 404) throw new Error((await existing.json().catch(() => null))?.error?.message ?? "OneDrive folder could not be opened.");
+  return createFolder(token, parentPath, name);
+}
+
 async function createFolder(token: string, parentPath: string, name: string) {
   return graph(token, parentPath, {
     method: "POST",
@@ -72,6 +83,68 @@ async function createFolder(token: string, parentPath: string, name: string) {
 }
 
 export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File; originalName: string; originalFile: File }> };
+export type CloudProjectSummary = { id: string; name: string; updatedAt: number; stationCount: number; photoCount: number; folderId: string };
+type SyncProject = { id: string; name: string; activeStationId: string; updatedAt: number; stations: Array<{ id: string; name: string; notes: string; photos: Array<{ id: string; name: string; file: File; originalName: string; originalFile: File }> }> };
+
+const savedRootName = "Fieldnote Saved Projects";
+
+export async function syncProjectToOneDrive(account: AccountInfo, project: SyncProject) {
+  const token = await accessToken(account);
+  const root = await ensureFolder(token, `/me/drive/root:/${encodeURIComponent(savedRootName)}`, "/me/drive/root/children", savedRootName);
+  const folderName = `Project-${project.id}`;
+  const folder = await ensureFolder(token, `/me/drive/items/${root.id}:/${folderName}`, `/me/drive/items/${root.id}/children`, folderName);
+  const filesFolder = await ensureFolder(token, `/me/drive/items/${folder.id}:/Files`, `/me/drive/items/${folder.id}/children`, "Files");
+  const manifest = { id: project.id, name: project.name, activeStationId: project.activeStationId, updatedAt: project.updatedAt, stations: [] as Array<Record<string, unknown>> };
+  for (const station of project.stations) {
+    const savedPhotos = [] as Array<Record<string, unknown>>;
+    for (const photo of station.photos) {
+      const originalFileName = `${photo.id}-original${extension(photo.originalName, ".jpg")}`;
+      await graph(token, `/me/drive/items/${filesFolder.id}:/${originalFileName}:/content`, { method: "PUT", headers: { "Content-Type": photo.originalFile.type || "application/octet-stream" }, body: photo.originalFile });
+      let annotatedFileName: string | null = null;
+      if (photo.file !== photo.originalFile) {
+        annotatedFileName = `${photo.id}-annotated.jpg`;
+        await graph(token, `/me/drive/items/${filesFolder.id}:/${annotatedFileName}:/content`, { method: "PUT", headers: { "Content-Type": photo.file.type || "image/jpeg" }, body: photo.file });
+      }
+      savedPhotos.push({ id: photo.id, name: photo.name, originalName: photo.originalName, originalFileName, annotatedFileName });
+    }
+    manifest.stations.push({ id: station.id, name: station.name, notes: station.notes, photos: savedPhotos });
+  }
+  await graph(token, `/me/drive/items/${folder.id}:/project.json:/content`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(manifest) });
+}
+
+export async function listOneDriveProjects(account: AccountInfo): Promise<CloudProjectSummary[]> {
+  const token = await accessToken(account);
+  const response = await graphResponse(token, `/me/drive/root:/${encodeURIComponent(savedRootName)}:/children`);
+  if (response.status === 404) return [];
+  if (!response.ok) throw new Error("Saved OneDrive projects could not be loaded.");
+  const children = (await response.json()).value as Array<{ id: string; folder?: unknown }>;
+  const results = await Promise.all(children.filter((item) => item.folder).map(async (item) => {
+    const manifestResponse = await graphResponse(token, `/me/drive/items/${item.id}:/project.json:/content`);
+    if (!manifestResponse.ok) return null;
+    const data = await manifestResponse.json();
+    return { id: data.id, name: data.name, updatedAt: data.updatedAt, stationCount: data.stations.length, photoCount: data.stations.reduce((sum: number, station: { photos: unknown[] }) => sum + station.photos.length, 0), folderId: item.id } as CloudProjectSummary;
+  }));
+  return results.filter((item): item is CloudProjectSummary => Boolean(item)).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function loadOneDriveProject(account: AccountInfo, summary: CloudProjectSummary): Promise<SyncProject> {
+  const token = await accessToken(account);
+  const manifestResponse = await graphResponse(token, `/me/drive/items/${summary.folderId}:/project.json:/content`);
+  if (!manifestResponse.ok) throw new Error("This saved project could not be opened.");
+  const data = await manifestResponse.json();
+  for (const station of data.stations) for (const photo of station.photos) {
+    const originalResponse = await graphResponse(token, `/me/drive/items/${summary.folderId}:/Files/${photo.originalFileName}:/content`);
+    if (!originalResponse.ok) throw new Error("An original project photo could not be downloaded.");
+    photo.originalFile = new File([await originalResponse.blob()], photo.originalName);
+    if (photo.annotatedFileName) {
+      const annotatedResponse = await graphResponse(token, `/me/drive/items/${summary.folderId}:/Files/${photo.annotatedFileName}:/content`);
+      if (!annotatedResponse.ok) throw new Error("An annotated project photo could not be downloaded.");
+      photo.file = new File([await annotatedResponse.blob()], photo.name, { type: "image/jpeg" });
+    } else photo.file = photo.originalFile;
+    delete photo.originalFileName; delete photo.annotatedFileName;
+  }
+  return data as SyncProject;
+}
 
 export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: string, stations: UploadStation[], onProgress: (message: string) => void) {
   const token = await accessToken(account);
