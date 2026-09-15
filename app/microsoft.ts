@@ -10,6 +10,11 @@ function cleanName(value: string, fallback: string) {
   return cleaned || fallback;
 }
 
+function extension(name: string, fallback: string) {
+  const match = name.match(/\.[a-zA-Z0-9]{1,8}$/);
+  return match?.[0].toLowerCase() || fallback;
+}
+
 async function client() {
   if (!clientPromise) {
     clientPromise = (async () => {
@@ -81,11 +86,14 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     const annotated = annotatedPhotos.length ? await createFolder(token, `/me/drive/items/${folder.id}/children`, "Annotated Photos") : null;
     for (let photoIndex = 0; photoIndex < station.photos.length; photoIndex++) {
       const photo = station.photos[photoIndex];
+      const sequence = String(photoIndex + 1).padStart(2, "0");
+      const originalName = `${stationName} ${sequence}${extension(photo.originalName, ".jpg")}`;
+      const annotatedName = `${stationName} ${sequence} - Annotated.jpg`;
       onProgress(`Uploading ${stationName}: photo ${photoIndex + 1} of ${station.photos.length}`);
-      await graph(token, `/me/drive/items/${originals.id}:/${encodeURIComponent(cleanName(photo.originalName, `Photo ${photoIndex + 1}.jpg`))}:/content`, {
+      await graph(token, `/me/drive/items/${originals.id}:/${encodeURIComponent(cleanName(originalName, `Photo ${sequence}.jpg`))}:/content`, {
         method: "PUT", headers: { "Content-Type": photo.originalFile.type || "application/octet-stream" }, body: photo.originalFile,
       });
-      if (annotated && photo.file !== photo.originalFile) await graph(token, `/me/drive/items/${annotated.id}:/${encodeURIComponent(cleanName(photo.name, `Photo ${photoIndex + 1}-annotated.jpg`))}:/content`, {
+      if (annotated && photo.file !== photo.originalFile) await graph(token, `/me/drive/items/${annotated.id}:/${encodeURIComponent(cleanName(annotatedName, `Photo ${sequence} - Annotated.jpg`))}:/content`, {
         method: "PUT", headers: { "Content-Type": photo.file.type || "image/jpeg" }, body: photo.file,
       });
     }
