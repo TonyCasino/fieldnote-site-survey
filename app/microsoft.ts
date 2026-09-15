@@ -66,7 +66,7 @@ async function createFolder(token: string, parentPath: string, name: string) {
   });
 }
 
-export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File }> };
+export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File; originalName: string; originalFile: File }> };
 
 export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: string, stations: UploadStation[], onProgress: (message: string) => void) {
   const token = await accessToken(account);
@@ -76,11 +76,17 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     const stationName = cleanName(station.name, `Station ${index + 1}`);
     onProgress(`Creating ${stationName}…`);
     const folder = await createFolder(token, `/me/drive/items/${root.id}/children`, stationName);
+    const originals = await createFolder(token, `/me/drive/items/${folder.id}/children`, "Original Photos");
+    const annotatedPhotos = station.photos.filter((photo) => photo.file !== photo.originalFile);
+    const annotated = annotatedPhotos.length ? await createFolder(token, `/me/drive/items/${folder.id}/children`, "Annotated Photos") : null;
     for (let photoIndex = 0; photoIndex < station.photos.length; photoIndex++) {
       const photo = station.photos[photoIndex];
       onProgress(`Uploading ${stationName}: photo ${photoIndex + 1} of ${station.photos.length}`);
-      await graph(token, `/me/drive/items/${folder.id}:/${encodeURIComponent(cleanName(photo.name, `Photo ${photoIndex + 1}.jpg`))}:/content`, {
-        method: "PUT", headers: { "Content-Type": photo.file.type || "application/octet-stream" }, body: photo.file,
+      await graph(token, `/me/drive/items/${originals.id}:/${encodeURIComponent(cleanName(photo.originalName, `Photo ${photoIndex + 1}.jpg`))}:/content`, {
+        method: "PUT", headers: { "Content-Type": photo.originalFile.type || "application/octet-stream" }, body: photo.originalFile,
+      });
+      if (annotated && photo.file !== photo.originalFile) await graph(token, `/me/drive/items/${annotated.id}:/${encodeURIComponent(cleanName(photo.name, `Photo ${photoIndex + 1}-annotated.jpg`))}:/content`, {
+        method: "PUT", headers: { "Content-Type": photo.file.type || "image/jpeg" }, body: photo.file,
       });
     }
     const notes = station.notes.trim() || "No field notes were entered for this station.";
