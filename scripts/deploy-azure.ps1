@@ -11,6 +11,7 @@ $env:AZURE_CONFIG_DIR = Join-Path $env:TEMP "fieldnote-azure-cli"
 
 Push-Location $projectRoot
 try {
+  $env:AZURE_STATIC_EXPORT = "1"
   & node node_modules/next/dist/bin/next build
   if ($LASTEXITCODE -ne 0) { throw "Azure build failed." }
   $token = & $az staticwebapp secrets list --resource-group $ResourceGroup --name $AppName --query properties.apiKey -o tsv
