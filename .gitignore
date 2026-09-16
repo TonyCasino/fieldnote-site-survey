@@ -44,3 +44,5 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+/.azure-deploy/
+/fieldnote-azure.zip

@@ -11,7 +11,8 @@
     "build": "node scripts/run-framework.mjs build",
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "deploy:azure": "powershell -ExecutionPolicy Bypass -File scripts/deploy-azure.ps1"
   },
   "dependencies": {
     "@azure/msal-browser": "^4.26.2",
@@ -41,6 +42,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@azure/static-web-apps-cli": "^2.0.10",
     "@cloudflare/vite-plugin": "1.37.1",
     "@cloudflare/workers-types": "4.20260515.1",
     "@tailwindcss/postcss": "4.2.1",

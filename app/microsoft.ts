@@ -54,12 +54,12 @@ async function accessToken(account: AccountInfo) {
   }
 }
 
-async function graph(token: string, path: string, init: RequestInit) {
+async function graph(token: string, path: string, init: RequestInit): Promise<any> {
   const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
   });
-  if (!response.ok) throw new Error((await response.json().catch(() => null))?.error?.message ?? `OneDrive returned ${response.status}`);
+  if (!response.ok) throw new Error(((await response.json().catch(() => null)) as any)?.error?.message ?? `OneDrive returned ${response.status}`);
   return response.json();
 }
 
@@ -67,10 +67,10 @@ async function graphResponse(token: string, path: string, init: RequestInit = {}
   return fetch(`https://graph.microsoft.com/v1.0${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) } });
 }
 
-async function ensureFolder(token: string, path: string, parentPath: string, name: string) {
+async function ensureFolder(token: string, path: string, parentPath: string, name: string): Promise<any> {
   const existing = await graphResponse(token, path);
   if (existing.ok) return existing.json();
-  if (existing.status !== 404) throw new Error((await existing.json().catch(() => null))?.error?.message ?? "OneDrive folder could not be opened.");
+  if (existing.status !== 404) throw new Error(((await existing.json().catch(() => null)) as any)?.error?.message ?? "OneDrive folder could not be opened.");
   return createFolder(token, parentPath, name);
 }
 
@@ -87,10 +87,8 @@ export type CloudProjectSummary = { id: string; name: string; updatedAt: number;
 type SyncProject = { id: string; name: string; activeStationId: string; updatedAt: number; stations: Array<{ id: string; name: string; notes: string; photos: Array<{ id: string; name: string; file: File; originalName: string; originalFile: File }> }> };
 
 const savedRootName = "Fieldnote Saved Projects";
-const fieldnoteUrl = "https://fieldnote-site-survey.nick-templeton-work.chatgpt.site";
-
 async function uploadProjectShortcut(token: string, folderId: string, projectId: string) {
-  const shortcut = `[InternetShortcut]\r\nURL=${fieldnoteUrl}/?project=${encodeURIComponent(projectId)}\r\n`;
+  const shortcut = `[InternetShortcut]\r\nURL=${window.location.origin}/?project=${encodeURIComponent(projectId)}\r\n`;
   await graph(token, `/me/drive/items/${folderId}:/${encodeURIComponent("Open in Fieldnote.url")}:/content`, { method: "PUT", headers: { "Content-Type": "application/internet-shortcut" }, body: shortcut });
 }
 
@@ -124,11 +122,11 @@ export async function listOneDriveProjects(account: AccountInfo): Promise<CloudP
   const response = await graphResponse(token, `/me/drive/root:/${encodeURIComponent(savedRootName)}:/children`);
   if (response.status === 404) return [];
   if (!response.ok) throw new Error("Saved OneDrive projects could not be loaded.");
-  const children = (await response.json()).value as Array<{ id: string; folder?: unknown }>;
+  const children = ((await response.json()) as any).value as Array<{ id: string; folder?: unknown }>;
   const results = await Promise.all(children.filter((item) => item.folder).map(async (item) => {
     const manifestResponse = await graphResponse(token, `/me/drive/items/${item.id}:/project.json:/content`);
     if (!manifestResponse.ok) return null;
-    const data = await manifestResponse.json();
+    const data = await manifestResponse.json() as any;
     return { id: data.id, name: data.name, updatedAt: data.updatedAt, stationCount: data.stations.length, photoCount: data.stations.reduce((sum: number, station: { photos: unknown[] }) => sum + station.photos.length, 0), folderId: item.id } as CloudProjectSummary;
   }));
   return results.filter((item): item is CloudProjectSummary => Boolean(item)).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -138,7 +136,7 @@ export async function loadOneDriveProject(account: AccountInfo, summary: CloudPr
   const token = await accessToken(account);
   const manifestResponse = await graphResponse(token, `/me/drive/items/${summary.folderId}:/project.json:/content`);
   if (!manifestResponse.ok) throw new Error("This saved project could not be opened.");
-  const data = await manifestResponse.json();
+  const data = await manifestResponse.json() as any;
   for (const station of data.stations) for (const photo of station.photos) {
     const originalResponse = await graphResponse(token, `/me/drive/items/${summary.folderId}:/Files/${photo.originalFileName}:/content`);
     if (!originalResponse.ok) throw new Error("An original project photo could not be downloaded.");
