@@ -82,6 +82,32 @@ async function createFolder(token: string, parentPath: string, name: string) {
   });
 }
 
+async function uploadFile(token: string, parentId: string, name: string, file: File, onProgress?: (percent: number) => void) {
+  if (!file || !file.size) throw new Error(`${name} is empty or no longer available on this device.`);
+  const safeName = encodeURIComponent(cleanName(name, "Photo.jpg"));
+  const session = await graph(token, `/me/drive/items/${parentId}:/${safeName}:/createUploadSession`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item: { name: cleanName(name, "Photo.jpg"), "@microsoft.graph.conflictBehavior": "replace" } }),
+  });
+  const chunkSize = 5 * 1024 * 1024;
+  for (let start = 0; start < file.size; start += chunkSize) {
+    const end = Math.min(start + chunkSize, file.size), chunk = file.slice(start, end);
+    let response: Response | null = null, lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const controller = new AbortController(), timeout = window.setTimeout(() => controller.abort(), 60000);
+      try {
+        response = await fetch(session.uploadUrl, { method: "PUT", headers: { "Content-Length": String(chunk.size), "Content-Range": `bytes ${start}-${end - 1}/${file.size}` }, body: chunk, signal: controller.signal });
+        if (response.ok) break;
+        lastError = new Error(`OneDrive returned ${response.status}`);
+      } catch (error) { lastError = error; }
+      finally { window.clearTimeout(timeout); }
+      await new Promise((resolve) => window.setTimeout(resolve, 600 * (attempt + 1)));
+    }
+    if (!response?.ok) throw new Error(`${name} could not be uploaded after three attempts. ${lastError instanceof Error ? lastError.message : ""}`.trim());
+    onProgress?.(Math.round(end / file.size * 100));
+  }
+}
+
 export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File; originalName: string; originalFile: File }> };
 export type CloudProjectSummary = { id: string; name: string; updatedAt: number; stationCount: number; photoCount: number; folderId: string };
 type SyncProject = { id: string; name: string; activeStationId: string; updatedAt: number; stations: Array<{ id: string; name: string; notes: string; photos: Array<{ id: string; name: string; file: File; originalName: string; originalFile: File }> }> };
@@ -103,11 +129,11 @@ export async function syncProjectToOneDrive(account: AccountInfo, project: SyncP
     const savedPhotos = [] as Array<Record<string, unknown>>;
     for (const photo of station.photos) {
       const originalFileName = `${photo.id}-original${extension(photo.originalName, ".jpg")}`;
-      await graph(token, `/me/drive/items/${filesFolder.id}:/${originalFileName}:/content`, { method: "PUT", headers: { "Content-Type": photo.originalFile.type || "application/octet-stream" }, body: photo.originalFile });
+      await uploadFile(token, filesFolder.id, originalFileName, photo.originalFile);
       let annotatedFileName: string | null = null;
       if (photo.file !== photo.originalFile) {
         annotatedFileName = `${photo.id}-annotated.jpg`;
-        await graph(token, `/me/drive/items/${filesFolder.id}:/${annotatedFileName}:/content`, { method: "PUT", headers: { "Content-Type": photo.file.type || "image/jpeg" }, body: photo.file });
+        await uploadFile(token, filesFolder.id, annotatedFileName, photo.file);
       }
       savedPhotos.push({ id: photo.id, name: photo.name, originalName: photo.originalName, originalFileName, annotatedFileName });
     }
@@ -153,6 +179,7 @@ export async function loadOneDriveProject(account: AccountInfo, summary: CloudPr
 
 export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: string, stations: UploadStation[], onProgress: (message: string) => void, projectId?: string) {
   const token = await accessToken(account);
+  const warnings: string[] = [];
   const root = await createFolder(token, "/me/drive/root/children", cleanName(surveyName, "Site Survey"));
   for (let index = 0; index < stations.length; index++) {
     const station = stations[index];
@@ -167,13 +194,10 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
       const sequence = String(photoIndex + 1).padStart(2, "0");
       const originalName = `${stationName} ${sequence}${extension(photo.originalName, ".jpg")}`;
       const annotatedName = `${stationName} ${sequence} - Annotated.jpg`;
-      onProgress(`Uploading ${stationName}: photo ${photoIndex + 1} of ${station.photos.length}`);
-      await graph(token, `/me/drive/items/${originals.id}:/${encodeURIComponent(cleanName(originalName, `Photo ${sequence}.jpg`))}:/content`, {
-        method: "PUT", headers: { "Content-Type": photo.originalFile.type || "application/octet-stream" }, body: photo.originalFile,
-      });
-      if (annotated && photo.file !== photo.originalFile) await graph(token, `/me/drive/items/${annotated.id}:/${encodeURIComponent(cleanName(annotatedName, `Photo ${sequence} - Annotated.jpg`))}:/content`, {
-        method: "PUT", headers: { "Content-Type": photo.file.type || "image/jpeg" }, body: photo.file,
-      });
+      try {
+        await uploadFile(token, originals.id, originalName, photo.originalFile, (percent) => onProgress(`Uploading ${stationName}: photo ${photoIndex + 1} of ${station.photos.length} · ${percent}%`));
+        if (annotated && photo.file !== photo.originalFile) await uploadFile(token, annotated.id, annotatedName, photo.file, (percent) => onProgress(`Uploading ${stationName}: annotated photo ${photoIndex + 1} · ${percent}%`));
+      } catch (error) { warnings.push(`${stationName} photo ${photoIndex + 1}: ${error instanceof Error ? error.message : "upload failed"}`); }
     }
     const notes = station.notes.trim() || "No field notes were entered for this station.";
     await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
@@ -189,5 +213,5 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     });
     shareUrl = share.link.webUrl as string;
   } catch { /* Tenant sharing policies may block organization links; the OneDrive folder still opens normally. */ }
-  return { folderUrl: root.webUrl as string, shareUrl };
+  return { folderUrl: root.webUrl as string, shareUrl, warnings };
 }
