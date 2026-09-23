@@ -85,27 +85,34 @@ async function createFolder(token: string, parentPath: string, name: string) {
 async function uploadFile(token: string, parentId: string, name: string, file: File, onProgress?: (percent: number) => void) {
   if (!file || !file.size) throw new Error(`${name} is empty or no longer available on this device.`);
   const safeName = encodeURIComponent(cleanName(name, "Photo.jpg"));
-  const session = await graph(token, `/me/drive/items/${parentId}:/${safeName}:/createUploadSession`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item: { name: cleanName(name, "Photo.jpg"), "@microsoft.graph.conflictBehavior": "replace" } }),
-  });
-  const chunkSize = 5 * 1024 * 1024;
-  for (let start = 0; start < file.size; start += chunkSize) {
-    const end = Math.min(start + chunkSize, file.size), chunk = file.slice(start, end);
-    let response: Response | null = null, lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const controller = new AbortController(), timeout = window.setTimeout(() => controller.abort(), 60000);
-      try {
-        response = await fetch(session.uploadUrl, { method: "PUT", headers: { "Content-Length": String(chunk.size), "Content-Range": `bytes ${start}-${end - 1}/${file.size}` }, body: chunk, signal: controller.signal });
-        if (response.ok) break;
-        lastError = new Error(`OneDrive returned ${response.status}`);
-      } catch (error) { lastError = error; }
-      finally { window.clearTimeout(timeout); }
-      await new Promise((resolve) => window.setTimeout(resolve, 600 * (attempt + 1)));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("PUT", `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${safeName}:/content`);
+        request.setRequestHeader("Authorization", `Bearer ${token}`);
+        request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+        request.timeout = 120000;
+        request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100)); };
+        request.onload = () => {
+          if (request.status >= 200 && request.status < 300) return resolve();
+          let message = `OneDrive returned ${request.status}`;
+          try { message = JSON.parse(request.responseText)?.error?.message || message; } catch { /* Keep the HTTP status. */ }
+          reject(new Error(message));
+        };
+        request.onerror = () => reject(new Error("The phone lost its connection to OneDrive."));
+        request.ontimeout = () => reject(new Error("OneDrive did not respond within two minutes."));
+        request.onabort = () => reject(new Error("The upload was interrupted."));
+        request.send(file);
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
     }
-    if (!response?.ok) throw new Error(`${name} could not be uploaded after three attempts. ${lastError instanceof Error ? lastError.message : ""}`.trim());
-    onProgress?.(Math.round(end / file.size * 100));
   }
+  throw new Error(`${name} could not be uploaded after three attempts. ${lastError instanceof Error ? lastError.message : ""}`.trim());
 }
 
 export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File; originalName: string; originalFile: File }> };
