@@ -82,14 +82,31 @@ async function createFolder(token: string, parentPath: string, name: string) {
   });
 }
 
+function readFileBytes(file: File, onProgress?: (percent: number) => void) {
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    const timeout = window.setTimeout(() => {
+      reader.abort();
+      reject(new Error("The phone could not open the saved photo within 30 seconds."));
+    }, 30000);
+    const finish = () => window.clearTimeout(timeout);
+    reader.onload = () => { finish(); reader.result instanceof ArrayBuffer ? resolve(reader.result) : reject(new Error("The saved photo data was unavailable.")); };
+    reader.onerror = () => { finish(); reject(reader.error ?? new Error("The saved photo could not be read.")); };
+    reader.onabort = () => finish();
+    reader.onprogress = (event) => { if (event.lengthComputable) onProgress?.(Math.max(1, Math.round(event.loaded / event.total * 10))); };
+    onProgress?.(1);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 async function uploadFile(token: string, parentId: string, name: string, file: File, onProgress?: (percent: number) => void) {
   if (!file || !file.size) throw new Error(`${name} is empty or no longer available on this device.`);
   const safeName = encodeURIComponent(cleanName(name, "Photo.jpg"));
   let contents: ArrayBuffer;
   try {
-    contents = await file.arrayBuffer();
-  } catch {
-    throw new Error(`${name} is listed in the project but its saved data cannot be read on this phone.`);
+    contents = await readFileBytes(file, onProgress);
+  } catch (error) {
+    throw new Error(`${name} is listed in the project but its saved data cannot be read on this phone. ${error instanceof Error ? error.message : ""}`.trim());
   }
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -100,7 +117,7 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
         request.setRequestHeader("Authorization", `Bearer ${token}`);
         request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
         request.timeout = 120000;
-        request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100)); };
+        request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(10 + Math.round(event.loaded / event.total * 90)); };
         request.onload = () => {
           if (request.status >= 200 && request.status < 300) return resolve();
           let message = `OneDrive returned ${request.status}`;

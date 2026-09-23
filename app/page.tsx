@@ -32,6 +32,8 @@ export default function Home() {
   const [editingPhoto, setEditingPhoto] = useState<Photo | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
   const openedLink = useRef(false);
+  const completingUpload = useRef(false);
+  const skipRestoredProjectSync = useRef(false);
   const current = stations.find((station) => station.id === active);
   const totalPhotos = stations.reduce((total, station) => total + station.photos.length, 0);
   const connected = Boolean(account);
@@ -51,7 +53,7 @@ export default function Home() {
         if (!summary) throw new Error("This Fieldnote project was not found in your OneDrive.");
         const loaded = await loadOneDriveProject(account, summary);
         const restored = loaded.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => normalizePhoto(photo)) }));
-        setCloudProjects(projects); setProjectId(loaded.id); setSurveyName(loaded.name); setStations(restored); setActive(loaded.activeStationId || restored[0]?.id || ""); setCloudStatus("Saved to OneDrive");
+        skipRestoredProjectSync.current = true; setCloudProjects(projects); setProjectId(loaded.id); setSurveyName(loaded.name); setStations(restored); setActive(loaded.activeStationId || restored[0]?.id || ""); setCloudStatus("Saved to OneDrive");
         window.history.replaceState({}, "", window.location.pathname);
       } catch (error) { setCloudStatus(error instanceof Error ? error.message : "The linked project could not be opened."); }
     })();
@@ -68,13 +70,15 @@ export default function Home() {
   }, [projectId, surveyName, active, stations]);
   useEffect(() => {
     if (!account || !projectId || !surveyName || !stations.length) return;
+    if (skipRestoredProjectSync.current) { skipRestoredProjectSync.current = false; return; }
     const timer = window.setTimeout(async () => {
+      if (completingUpload.current) return;
       setCloudStatus("Syncing to OneDrive…");
       try {
         await syncProjectToOneDrive(account, { id: projectId, name: surveyName, activeStationId: active, stations, updatedAt: Date.now() });
         setCloudStatus("Saved to OneDrive");
       } catch { setCloudStatus("OneDrive sync paused"); }
-    }, 1800);
+    }, 20000);
     return () => window.clearTimeout(timer);
   }, [account, projectId, surveyName, active, stations]);
 
@@ -86,9 +90,11 @@ export default function Home() {
 
   const uploadSurvey = async () => {
     if (!account) { await connectMicrosoft(); return; }
+    completingUpload.current = true;
     setUploadError(""); setUploadStatus("Preparing your OneDrive folders…");
     try { setUploaded(await uploadSurveyToOneDrive(account, surveyName, stations, setUploadStatus, projectId)); setUploadStatus(""); }
     catch (error) { setUploadStatus(""); setUploadError(`${error instanceof Error ? error.message : "The OneDrive upload could not be completed."} Your walkthrough is still saved and safe. You can close this message and try again.`); }
+    finally { completingUpload.current = false; }
   };
 
   const createSurvey = () => {
@@ -98,7 +104,7 @@ export default function Home() {
   };
   const openProject = (project: StoredProject) => {
     const restored = project.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => normalizePhoto(photo)) }));
-    setProjectId(project.id); setSurveyName(project.name); setStations(restored); setActive(project.activeStationId || restored[0]?.id || ""); setUploaded(null);
+    skipRestoredProjectSync.current = true; setProjectId(project.id); setSurveyName(project.name); setStations(restored); setActive(project.activeStationId || restored[0]?.id || ""); setUploaded(null);
   };
   const openCloudProject = async (project: CloudProjectSummary) => {
     if (!account) return;
@@ -106,7 +112,7 @@ export default function Home() {
     try {
       const loaded = await loadOneDriveProject(account, project);
       const restored = loaded.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => normalizePhoto(photo)) }));
-      setProjectId(loaded.id); setSurveyName(loaded.name); setStations(restored); setActive(loaded.activeStationId || restored[0]?.id || ""); setCloudStatus("Saved to OneDrive");
+      skipRestoredProjectSync.current = true; setProjectId(loaded.id); setSurveyName(loaded.name); setStations(restored); setActive(loaded.activeStationId || restored[0]?.id || ""); setCloudStatus("Saved to OneDrive");
     } catch (error) { setCloudStatus(error instanceof Error ? error.message : "The project could not be opened."); }
   };
   const removeProject = async (project: StoredProject) => { await deleteProject(project.id); setSavedProjects(await listProjects()); };
