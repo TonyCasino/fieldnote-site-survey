@@ -85,6 +85,12 @@ async function createFolder(token: string, parentPath: string, name: string) {
 async function uploadFile(token: string, parentId: string, name: string, file: File, onProgress?: (percent: number) => void) {
   if (!file || !file.size) throw new Error(`${name} is empty or no longer available on this device.`);
   const safeName = encodeURIComponent(cleanName(name, "Photo.jpg"));
+  let contents: ArrayBuffer;
+  try {
+    contents = await file.arrayBuffer();
+  } catch {
+    throw new Error(`${name} is listed in the project but its saved data cannot be read on this phone.`);
+  }
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -104,7 +110,7 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
         request.onerror = () => reject(new Error("The phone lost its connection to OneDrive."));
         request.ontimeout = () => reject(new Error("OneDrive did not respond within two minutes."));
         request.onabort = () => reject(new Error("The upload was interrupted."));
-        request.send(file);
+        request.send(contents);
       });
       return;
     } catch (error) {
@@ -207,9 +213,11 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
       } catch (error) { warnings.push(`${stationName} photo ${photoIndex + 1}: ${error instanceof Error ? error.message : "upload failed"}`); }
     }
     const notes = station.notes.trim() || "No field notes were entered for this station.";
-    await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
-      method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: notes,
-    });
+    try {
+      await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
+        method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: notes,
+      });
+    } catch (error) { warnings.push(`${stationName} notes: ${error instanceof Error ? error.message : "upload failed"}`); }
   }
   onProgress("Creating sharing link…");
   if (projectId) try { await uploadProjectShortcut(token, root.id, projectId); } catch { /* A blocked shortcut must not fail the completed survey. */ }
