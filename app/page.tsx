@@ -84,7 +84,7 @@ export default function Home() {
     if (!account) { await connectMicrosoft(); return; }
     setUploadError(""); setUploadStatus("Preparing your OneDrive folders…");
     try { setUploaded(await uploadSurveyToOneDrive(account, surveyName, stations, setUploadStatus, projectId)); setUploadStatus(""); }
-    catch (error) { setUploadStatus(""); setUploadError(error instanceof Error ? error.message : "The OneDrive upload could not be completed."); }
+    catch (error) { setUploadStatus(""); setUploadError(`${error instanceof Error ? error.message : "The OneDrive upload could not be completed."} Your walkthrough is still saved and safe. You can close this message and try again.`); }
   };
 
   const createSurvey = () => {

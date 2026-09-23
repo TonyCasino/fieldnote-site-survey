@@ -114,7 +114,7 @@ export async function syncProjectToOneDrive(account: AccountInfo, project: SyncP
     manifest.stations.push({ id: station.id, name: station.name, notes: station.notes, photos: savedPhotos });
   }
   await graph(token, `/me/drive/items/${folder.id}:/project.json:/content`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(manifest) });
-  await uploadProjectShortcut(token, folder.id, project.id);
+  try { await uploadProjectShortcut(token, folder.id, project.id); } catch { /* Some tenants block .url files; the project data is already safely synced. */ }
 }
 
 export async function listOneDriveProjects(account: AccountInfo): Promise<CloudProjectSummary[]> {
@@ -181,9 +181,13 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     });
   }
   onProgress("Creating sharing link…");
-  if (projectId) await uploadProjectShortcut(token, root.id, projectId);
-  const share = await graph(token, `/me/drive/items/${root.id}/createLink`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "view", scope: "organization" }),
-  });
-  return { folderUrl: root.webUrl as string, shareUrl: share.link.webUrl as string };
+  if (projectId) try { await uploadProjectShortcut(token, root.id, projectId); } catch { /* A blocked shortcut must not fail the completed survey. */ }
+  let shareUrl = root.webUrl as string;
+  try {
+    const share = await graph(token, `/me/drive/items/${root.id}/createLink`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "view", scope: "organization" }),
+    });
+    shareUrl = share.link.webUrl as string;
+  } catch { /* Tenant sharing policies may block organization links; the OneDrive folder still opens normally. */ }
+  return { folderUrl: root.webUrl as string, shareUrl };
 }
