@@ -1,0 +1,27 @@
+{
+  "name": "Fieldnote Site Survey",
+  "short_name": "Fieldnote",
+  "description": "Capture station photos, annotate measurements, and organize site surveys in OneDrive.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f4f7f7",
+  "theme_color": "#153239",
+  "categories": ["business", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/fieldnote-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/fieldnote-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
