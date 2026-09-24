@@ -1,7 +1,10 @@
 {
   "navigationFallback": {
     "rewrite": "/index.html",
-    "exclude": ["/_next/*", "/*.svg", "/*.png", "/*.jpg", "/*.jpeg"]
+    "exclude": ["/api/*", "/_next/*", "/*.svg", "/*.png", "/*.jpg", "/*.jpeg"]
+  },
+  "platform": {
+    "apiRuntime": "node:20"
   },
   "globalHeaders": {
     "X-Content-Type-Options": "nosniff",

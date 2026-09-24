@@ -113,15 +113,17 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
     try {
       await new Promise<void>((resolve, reject) => {
         const request = new XMLHttpRequest();
-        request.open("PUT", `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${safeName}:/content`);
-        request.setRequestHeader("Authorization", `Bearer ${token}`);
+        const useAzureProxy = window.location.hostname.endsWith(".azurestaticapps.net");
+        const destination = useAzureProxy ? `/api/upload?parentId=${encodeURIComponent(parentId)}&name=${safeName}` : `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${safeName}:/content`;
+        request.open(useAzureProxy ? "POST" : "PUT", destination);
+        request.setRequestHeader(useAzureProxy ? "X-Graph-Token" : "Authorization", useAzureProxy ? token : `Bearer ${token}`);
         request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
         request.timeout = 120000;
         request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(10 + Math.round(event.loaded / event.total * 90)); };
         request.onload = () => {
           if (request.status >= 200 && request.status < 300) return resolve();
           let message = `OneDrive returned ${request.status}`;
-          try { message = JSON.parse(request.responseText)?.error?.message || message; } catch { /* Keep the HTTP status. */ }
+          try { message = JSON.parse(request.responseText)?.error?.message || JSON.parse(request.responseText)?.error || message; } catch { /* Keep the HTTP status. */ }
           reject(new Error(message));
         };
         request.onerror = () => reject(new Error("The phone lost its connection to OneDrive."));
