@@ -140,9 +140,33 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
   throw new Error(`${name} could not be uploaded after three attempts. ${lastError instanceof Error ? lastError.message : ""}`.trim());
 }
 
+const uploadConcurrency = 3;
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File; originalName: string; originalFile: File }> };
 export type CloudProjectSummary = { id: string; name: string; updatedAt: number; stationCount: number; photoCount: number; folderId: string };
 type SyncProject = { id: string; name: string; activeStationId: string; updatedAt: number; stations: Array<{ id: string; name: string; notes: string; photos: Array<{ id: string; name: string; file: File; originalName: string; originalFile: File }> }> };
+type SyncedPhotoMetadata = {
+  id: string;
+  originalFileName: string;
+  originalSize?: number;
+  originalLastModified?: number;
+  annotatedFileName?: string | null;
+  annotatedSize?: number | null;
+  annotatedLastModified?: number | null;
+};
 
 const savedRootName = "Fieldnote Saved Projects";
 async function uploadProjectShortcut(token: string, folderId: string, projectId: string) {
@@ -156,21 +180,47 @@ export async function syncProjectToOneDrive(account: AccountInfo, project: SyncP
   const folderName = `Project-${project.id}`;
   const folder = await ensureFolder(token, `/me/drive/items/${root.id}:/${folderName}`, `/me/drive/items/${root.id}/children`, folderName);
   const filesFolder = await ensureFolder(token, `/me/drive/items/${folder.id}:/Files`, `/me/drive/items/${folder.id}/children`, "Files");
+  const previousPhotos = new Map<string, SyncedPhotoMetadata>();
+  const previousManifestResponse = await graphResponse(token, `/me/drive/items/${folder.id}:/project.json:/content`);
+  if (previousManifestResponse.ok) {
+    const previousManifest = await previousManifestResponse.json() as { stations?: Array<{ photos?: SyncedPhotoMetadata[] }> };
+    for (const station of previousManifest.stations ?? []) {
+      for (const photo of station.photos ?? []) previousPhotos.set(photo.id, photo);
+    }
+  }
   const manifest = { id: project.id, name: project.name, activeStationId: project.activeStationId, updatedAt: project.updatedAt, stations: [] as Array<Record<string, unknown>> };
+  const uploads: Array<() => Promise<void>> = [];
   for (const station of project.stations) {
     const savedPhotos = [] as Array<Record<string, unknown>>;
     for (const photo of station.photos) {
       const originalFileName = `${photo.id}-original${extension(photo.originalName, ".jpg")}`;
-      await uploadFile(token, filesFolder.id, originalFileName, photo.originalFile);
+      const previous = previousPhotos.get(photo.id);
+      if (!previous || previous.originalFileName !== originalFileName || previous.originalSize !== photo.originalFile.size || previous.originalLastModified !== photo.originalFile.lastModified) {
+        uploads.push(() => uploadFile(token, filesFolder.id, originalFileName, photo.originalFile));
+      }
       let annotatedFileName: string | null = null;
       if (photo.file !== photo.originalFile) {
-        annotatedFileName = `${photo.id}-annotated.jpg`;
-        await uploadFile(token, filesFolder.id, annotatedFileName, photo.file);
+        const nextAnnotatedFileName = `${photo.id}-annotated.jpg`;
+        annotatedFileName = nextAnnotatedFileName;
+        if (!previous || previous.annotatedFileName !== nextAnnotatedFileName || previous.annotatedSize !== photo.file.size || previous.annotatedLastModified !== photo.file.lastModified) {
+          uploads.push(() => uploadFile(token, filesFolder.id, nextAnnotatedFileName, photo.file));
+        }
       }
-      savedPhotos.push({ id: photo.id, name: photo.name, originalName: photo.originalName, originalFileName, annotatedFileName });
+      savedPhotos.push({
+        id: photo.id,
+        name: photo.name,
+        originalName: photo.originalName,
+        originalFileName,
+        originalSize: photo.originalFile.size,
+        originalLastModified: photo.originalFile.lastModified,
+        annotatedFileName,
+        annotatedSize: annotatedFileName ? photo.file.size : null,
+        annotatedLastModified: annotatedFileName ? photo.file.lastModified : null,
+      });
     }
     manifest.stations.push({ id: station.id, name: station.name, notes: station.notes, photos: savedPhotos });
   }
+  await mapWithConcurrency(uploads, uploadConcurrency, (upload) => upload());
   await graph(token, `/me/drive/items/${folder.id}:/project.json:/content`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(manifest) });
   try { await uploadProjectShortcut(token, folder.id, project.id); } catch { /* Some tenants block .url files; the project data is already safely synced. */ }
 }
@@ -213,31 +263,62 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
   const token = await accessToken(account);
   const warnings: string[] = [];
   const root = await createFolder(token, "/me/drive/root/children", cleanName(surveyName, "Site Survey"));
-  for (let index = 0; index < stations.length; index++) {
-    const station = stations[index];
+  const preparedStations = await mapWithConcurrency(stations, uploadConcurrency, async (station, index) => {
     const stationName = cleanName(station.name, `Station ${index + 1}`);
     onProgress(`Creating ${stationName}…`);
     const folder = await createFolder(token, `/me/drive/items/${root.id}/children`, stationName);
-    const originals = await createFolder(token, `/me/drive/items/${folder.id}/children`, "Original Photos");
     const annotatedPhotos = station.photos.filter((photo) => photo.file !== photo.originalFile);
-    const annotated = annotatedPhotos.length ? await createFolder(token, `/me/drive/items/${folder.id}/children`, "Annotated Photos") : null;
-    for (let photoIndex = 0; photoIndex < station.photos.length; photoIndex++) {
-      const photo = station.photos[photoIndex];
-      const sequence = String(photoIndex + 1).padStart(2, "0");
-      const originalName = `${stationName} ${sequence}${extension(photo.originalName, ".jpg")}`;
-      const annotatedName = `${stationName} ${sequence} - Annotated.jpg`;
-      try {
-        await uploadFile(token, originals.id, originalName, photo.originalFile, (percent) => onProgress(`Uploading ${stationName}: photo ${photoIndex + 1} of ${station.photos.length} · ${percent}%`));
-        if (annotated && photo.file !== photo.originalFile) await uploadFile(token, annotated.id, annotatedName, photo.file, (percent) => onProgress(`Uploading ${stationName}: annotated photo ${photoIndex + 1} · ${percent}%`));
-      } catch (error) { warnings.push(`${stationName} photo ${photoIndex + 1}: ${error instanceof Error ? error.message : "upload failed"}`); }
-    }
+    const [originals, annotated] = await Promise.all([
+      createFolder(token, `/me/drive/items/${folder.id}/children`, "Original Photos"),
+      annotatedPhotos.length ? createFolder(token, `/me/drive/items/${folder.id}/children`, "Annotated Photos") : Promise.resolve(null),
+    ]);
     const notes = station.notes.trim() || "No field notes were entered for this station.";
     try {
       await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
         method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: notes,
       });
     } catch (error) { warnings.push(`${stationName} notes: ${error instanceof Error ? error.message : "upload failed"}`); }
+    return { station, stationName, originals, annotated };
+  });
+
+  type UploadTask = { label: string; warningLabel: string; run: (onFileProgress: (percent: number) => void) => Promise<void> };
+  const uploadTasks: UploadTask[] = [];
+  for (const { station, stationName, originals, annotated } of preparedStations) {
+    station.photos.forEach((photo, photoIndex) => {
+      const sequence = String(photoIndex + 1).padStart(2, "0");
+      const originalName = `${stationName} ${sequence}${extension(photo.originalName, ".jpg")}`;
+      const annotatedName = `${stationName} ${sequence} - Annotated.jpg`;
+      uploadTasks.push({
+        label: `${stationName} photo ${photoIndex + 1}`,
+        warningLabel: `${stationName} photo ${photoIndex + 1}`,
+        run: (progress) => uploadFile(token, originals.id, originalName, photo.originalFile, progress),
+      });
+      if (annotated && photo.file !== photo.originalFile) uploadTasks.push({
+        label: `${stationName} annotated ${photoIndex + 1}`,
+        warningLabel: `${stationName} annotated photo ${photoIndex + 1}`,
+        run: (progress) => uploadFile(token, annotated.id, annotatedName, photo.file, progress),
+      });
+    });
   }
+
+  let completedFiles = 0;
+  const fileProgress = new Map<number, number>();
+  const reportProgress = (taskIndex: number, label: string, percent: number) => {
+    fileProgress.set(taskIndex, percent);
+    const inProgress = [...fileProgress.values()].reduce((sum, value) => sum + value, 0) / 100;
+    const overall = uploadTasks.length ? Math.round((completedFiles + inProgress) / uploadTasks.length * 100) : 100;
+    onProgress(`Uploading ${label} · ${completedFiles}/${uploadTasks.length} · ${overall}%`);
+  };
+  await mapWithConcurrency(uploadTasks, uploadConcurrency, async (task, taskIndex) => {
+    try {
+      await task.run((percent) => reportProgress(taskIndex, task.label, percent));
+    } catch (error) {
+      warnings.push(`${task.warningLabel}: ${error instanceof Error ? error.message : "upload failed"}`);
+    } finally {
+      fileProgress.delete(taskIndex);
+      completedFiles++;
+    }
+  });
   onProgress("Creating sharing link…");
   if (projectId) try { await uploadProjectShortcut(token, root.id, projectId); } catch { /* A blocked shortcut must not fail the completed survey. */ }
   let shareUrl = root.webUrl as string;
