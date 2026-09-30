@@ -271,7 +271,7 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     const stationName = cleanName(station.name, `Station ${index + 1}`);
     onProgress(`Creating ${stationName}…`);
     const folder = await createFolder(token, `/me/drive/items/${root.id}/children`, stationName);
-    const originals = await createFolder(token, `/me/drive/items/${folder.id}/children`, "Original Photos");
+    const originals = await createFolder(token, `/me/drive/items/${folder.id}/children`, "Originals");
     const notes = station.notes.trim() || "No field notes were entered for this station.";
     try {
       await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
