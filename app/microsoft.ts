@@ -99,7 +99,7 @@ function readFileBytes(file: File, onProgress?: (percent: number) => void) {
   });
 }
 
-async function uploadFile(token: string, parentId: string, name: string, file: File, onProgress?: (percent: number) => void) {
+async function uploadFile(token: string, parentId: string, name: string, file: File, onProgress?: (percent: number) => void, duplicate?: { parentId: string; name: string }) {
   if (!file || !file.size) throw new Error(`${name} is empty or no longer available on this device.`);
   const safeName = encodeURIComponent(cleanName(name, "Photo.jpg"));
   let contents: ArrayBuffer;
@@ -114,7 +114,8 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
       await new Promise<void>((resolve, reject) => {
         const request = new XMLHttpRequest();
         const useAzureProxy = window.location.hostname.endsWith(".azurestaticapps.net");
-        const destination = useAzureProxy ? `/api/upload?parentId=${encodeURIComponent(parentId)}&name=${safeName}` : `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${safeName}:/content`;
+        const duplicateQuery = duplicate ? `&copyParentId=${encodeURIComponent(duplicate.parentId)}&copyName=${encodeURIComponent(cleanName(duplicate.name, "Photo.jpg"))}` : "";
+        const destination = useAzureProxy ? `/api/upload?parentId=${encodeURIComponent(parentId)}&name=${safeName}${duplicateQuery}` : `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${safeName}:/content`;
         request.open(useAzureProxy ? "POST" : "PUT", destination);
         request.setRequestHeader(useAzureProxy ? "X-Graph-Token" : "Authorization", useAzureProxy ? token : `Bearer ${token}`);
         request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
@@ -131,6 +132,9 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
         request.onabort = () => reject(new Error("The upload was interrupted."));
         request.send(contents);
       });
+      if (duplicate && !window.location.hostname.endsWith(".azurestaticapps.net")) {
+        await uploadFile(token, duplicate.parentId, duplicate.name, file);
+      }
       return;
     } catch (error) {
       lastError = error;
@@ -267,36 +271,39 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     const stationName = cleanName(station.name, `Station ${index + 1}`);
     onProgress(`Creating ${stationName}…`);
     const folder = await createFolder(token, `/me/drive/items/${root.id}/children`, stationName);
-    const annotatedPhotos = station.photos.filter((photo) => photo.file !== photo.originalFile);
-    const [originals, annotated] = await Promise.all([
-      createFolder(token, `/me/drive/items/${folder.id}/children`, "Original Photos"),
-      annotatedPhotos.length ? createFolder(token, `/me/drive/items/${folder.id}/children`, "Annotated Photos") : Promise.resolve(null),
-    ]);
+    const originals = await createFolder(token, `/me/drive/items/${folder.id}/children`, "Original Photos");
     const notes = station.notes.trim() || "No field notes were entered for this station.";
     try {
       await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
         method: "PUT", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: notes,
       });
     } catch (error) { warnings.push(`${stationName} notes: ${error instanceof Error ? error.message : "upload failed"}`); }
-    return { station, stationName, originals, annotated };
+    return { station, stationName, folder, originals };
   });
 
   type UploadTask = { label: string; warningLabel: string; run: (onFileProgress: (percent: number) => void) => Promise<void> };
   const uploadTasks: UploadTask[] = [];
-  for (const { station, stationName, originals, annotated } of preparedStations) {
+  for (const { station, stationName, folder, originals } of preparedStations) {
     station.photos.forEach((photo, photoIndex) => {
       const sequence = String(photoIndex + 1).padStart(2, "0");
       const originalName = `${stationName} ${sequence}${extension(photo.originalName, ".jpg")}`;
-      const annotatedName = `${stationName} ${sequence} - Annotated.jpg`;
-      uploadTasks.push({
-        label: `${stationName} photo ${photoIndex + 1}`,
-        warningLabel: `${stationName} photo ${photoIndex + 1}`,
+      const finishedName = `${stationName} ${sequence}${photo.file !== photo.originalFile ? ".jpg" : extension(photo.originalName, ".jpg")}`;
+      if (photo.file !== photo.originalFile) uploadTasks.push({
+        label: `${stationName} original ${photoIndex + 1}`,
+        warningLabel: `${stationName} original photo ${photoIndex + 1}`,
         run: (progress) => uploadFile(token, originals.id, originalName, photo.originalFile, progress),
       });
-      if (annotated && photo.file !== photo.originalFile) uploadTasks.push({
-        label: `${stationName} annotated ${photoIndex + 1}`,
-        warningLabel: `${stationName} annotated photo ${photoIndex + 1}`,
-        run: (progress) => uploadFile(token, annotated.id, annotatedName, photo.file, progress),
+      uploadTasks.push({
+        label: `${stationName} finished ${photoIndex + 1}`,
+        warningLabel: `${stationName} finished photo ${photoIndex + 1}`,
+        run: (progress) => uploadFile(
+          token,
+          folder.id,
+          finishedName,
+          photo.file,
+          progress,
+          photo.file === photo.originalFile ? { parentId: originals.id, name: originalName } : undefined,
+        ),
       });
     });
   }
