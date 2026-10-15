@@ -144,7 +144,7 @@ async function uploadFile(token: string, parentId: string, name: string, file: F
   throw new Error(`${name} could not be uploaded after three attempts. ${lastError instanceof Error ? lastError.message : ""}`.trim());
 }
 
-const uploadConcurrency = 3;
+const uploadConcurrency = 4;
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
   const results = new Array<R>(items.length);
@@ -159,7 +159,7 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item
   return results;
 }
 
-export type UploadStation = { name: string; notes: string; photos: Array<{ name: string; file: File; originalName: string; originalFile: File }> };
+export type UploadStation = { id?: string; name: string; notes: string; photos: Array<{ id?: string; name: string; file: File; originalName: string; originalFile: File }> };
 export type CloudProjectSummary = { id: string; name: string; updatedAt: number; stationCount: number; photoCount: number; folderId: string };
 type SyncProject = { id: string; name: string; activeStationId: string; updatedAt: number; stations: Array<{ id: string; name: string; notes: string; photos: Array<{ id: string; name: string; file: File; originalName: string; originalFile: File }> }> };
 type SyncedPhotoMetadata = {
@@ -263,15 +263,55 @@ export async function loadOneDriveProject(account: AccountInfo, summary: CloudPr
   return data as SyncProject;
 }
 
-export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: string, stations: UploadStation[], onProgress: (message: string) => void, projectId?: string) {
+export type SurveyUploadOptions = {
+  rootId?: string;
+  completedFileKeys?: string[];
+  retryUntilComplete?: boolean;
+  onRootReady?: (root: { id: string; webUrl: string }) => void | Promise<void>;
+  onFileUploaded?: (key: string) => void | Promise<void>;
+};
+
+export async function uploadSurveyToOneDrive(
+  account: AccountInfo,
+  surveyName: string,
+  stations: UploadStation[],
+  onProgress: (message: string) => void,
+  projectId?: string,
+  options: SurveyUploadOptions = {},
+) {
   const token = await accessToken(account);
   const warnings: string[] = [];
-  const root = await createFolder(token, "/me/drive/root/children", cleanName(surveyName, "Site Survey"));
+  let root: { id: string; webUrl: string };
+  if (options.rootId) {
+    const existingRoot = await graphResponse(token, `/me/drive/items/${encodeURIComponent(options.rootId)}`);
+    if (existingRoot.ok) root = await existingRoot.json() as { id: string; webUrl: string };
+    else if (existingRoot.status === 404) root = await createFolder(token, "/me/drive/root/children", cleanName(surveyName, "Site Survey"));
+    else throw new Error("The existing OneDrive survey folder could not be opened.");
+  } else root = await createFolder(token, "/me/drive/root/children", cleanName(surveyName, "Site Survey"));
+  await options.onRootReady?.(root);
+
+  const usedStationNames = new Map<string, number>();
+  const stationFolderNames = stations.map((station, index) => {
+    const baseName = cleanName(station.name, `Station ${index + 1}`);
+    const occurrence = (usedStationNames.get(baseName.toLowerCase()) ?? 0) + 1;
+    usedStationNames.set(baseName.toLowerCase(), occurrence);
+    return occurrence === 1 ? baseName : `${baseName} ${occurrence}`;
+  });
   const preparedStations = await mapWithConcurrency(stations, uploadConcurrency, async (station, index) => {
-    const stationName = cleanName(station.name, `Station ${index + 1}`);
-    onProgress(`Creating ${stationName}…`);
-    const folder = await createFolder(token, `/me/drive/items/${root.id}/children`, stationName);
-    const originals = await createFolder(token, `/me/drive/items/${folder.id}/children`, "Originals");
+    const stationName = stationFolderNames[index];
+    onProgress(`Preparing ${stationName}…`);
+    const folder = await ensureFolder(
+      token,
+      `/me/drive/items/${root.id}:/${encodeURIComponent(stationName)}`,
+      `/me/drive/items/${root.id}/children`,
+      stationName,
+    );
+    const originals = await ensureFolder(
+      token,
+      `/me/drive/items/${folder.id}:/${encodeURIComponent("Originals")}`,
+      `/me/drive/items/${folder.id}/children`,
+      "Originals",
+    );
     const notes = station.notes.trim() || "No field notes were entered for this station.";
     try {
       await graph(token, `/me/drive/items/${folder.id}:/Notes.txt:/content`, {
@@ -281,19 +321,23 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     return { station, stationName, folder, originals };
   });
 
-  type UploadTask = { label: string; warningLabel: string; run: (onFileProgress: (percent: number) => void) => Promise<void> };
-  const uploadTasks: UploadTask[] = [];
+  type UploadTask = { key: string; label: string; warningLabel: string; run: (onFileProgress: (percent: number) => void) => Promise<void> };
+  const allUploadTasks: UploadTask[] = [];
   for (const { station, stationName, folder, originals } of preparedStations) {
     station.photos.forEach((photo, photoIndex) => {
       const sequence = String(photoIndex + 1).padStart(2, "0");
       const originalName = `${stationName} ${sequence}${extension(photo.originalName, ".jpg")}`;
       const finishedName = `${stationName} ${sequence}${photo.file !== photo.originalFile ? ".jpg" : extension(photo.originalName, ".jpg")}`;
-      if (photo.file !== photo.originalFile) uploadTasks.push({
+      const originalFingerprint = `${photo.originalFile.size}-${photo.originalFile.lastModified}`;
+      const finishedFingerprint = `${photo.file.size}-${photo.file.lastModified}`;
+      if (photo.file !== photo.originalFile) allUploadTasks.push({
+        key: `original:${station.id ?? stationName}:${stationName}:${photo.id ?? photoIndex}:${originalFingerprint}`,
         label: `${stationName} original ${photoIndex + 1}`,
         warningLabel: `${stationName} original photo ${photoIndex + 1}`,
         run: (progress) => uploadFile(token, originals.id, originalName, photo.originalFile, progress),
       });
-      uploadTasks.push({
+      allUploadTasks.push({
+        key: `finished:${station.id ?? stationName}:${stationName}:${photo.id ?? photoIndex}:${finishedFingerprint}`,
         label: `${stationName} finished ${photoIndex + 1}`,
         warningLabel: `${stationName} finished photo ${photoIndex + 1}`,
         run: (progress) => uploadFile(
@@ -308,17 +352,20 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     });
   }
 
-  let completedFiles = 0;
+  const completedKeys = new Set(options.completedFileKeys ?? []);
+  const uploadTasks = allUploadTasks.filter((task) => !completedKeys.has(task.key));
+  let completedFiles = allUploadTasks.length - uploadTasks.length;
   const fileProgress = new Map<number, number>();
   const reportProgress = (taskIndex: number, label: string, percent: number) => {
     fileProgress.set(taskIndex, percent);
     const inProgress = [...fileProgress.values()].reduce((sum, value) => sum + value, 0) / 100;
-    const overall = uploadTasks.length ? Math.round((completedFiles + inProgress) / uploadTasks.length * 100) : 100;
-    onProgress(`Uploading ${label} · ${completedFiles}/${uploadTasks.length} · ${overall}%`);
+    const overall = allUploadTasks.length ? Math.round((completedFiles + inProgress) / allUploadTasks.length * 100) : 100;
+    onProgress(`Uploading ${label} · ${completedFiles}/${allUploadTasks.length} · ${overall}%`);
   };
   await mapWithConcurrency(uploadTasks, uploadConcurrency, async (task, taskIndex) => {
     try {
       await task.run((percent) => reportProgress(taskIndex, task.label, percent));
+      await options.onFileUploaded?.(task.key);
     } catch (error) {
       warnings.push(`${task.warningLabel}: ${error instanceof Error ? error.message : "upload failed"}`);
     } finally {
@@ -326,6 +373,10 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
       completedFiles++;
     }
   });
+  if (options.retryUntilComplete && warnings.length) {
+    throw new Error(`${warnings.length} item${warnings.length === 1 ? "" : "s"} still need to upload.`);
+  }
+
   onProgress("Creating sharing link…");
   if (projectId) try { await uploadProjectShortcut(token, root.id, projectId); } catch { /* A blocked shortcut must not fail the completed survey. */ }
   let shareUrl = root.webUrl as string;
@@ -335,5 +386,5 @@ export async function uploadSurveyToOneDrive(account: AccountInfo, surveyName: s
     });
     shareUrl = share.link.webUrl as string;
   } catch { /* Tenant sharing policies may block organization links; the OneDrive folder still opens normally. */ }
-  return { folderUrl: root.webUrl as string, shareUrl, warnings };
+  return { rootId: root.id as string, folderUrl: root.webUrl as string, shareUrl, warnings };
 }

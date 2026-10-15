@@ -7,7 +7,7 @@ import type { AccountInfo } from "@azure/msal-browser";
 import { Camera, Check, ChevronLeft, Cloud, FolderOpen, ImagePlus, MapPin, PenLine, Plus, Share2, Trash2, Upload } from "lucide-react";
 import { currentMicrosoftAccount, listOneDriveProjects, loadOneDriveProject, signInMicrosoft, syncProjectToOneDrive, uploadSurveyToOneDrive, type CloudProjectSummary } from "./microsoft";
 import PhotoAnnotator from "./PhotoAnnotator";
-import { deleteProject, listProjects, saveProject, type StoredProject } from "./projectStorage";
+import { deleteProject, getProject, listProjects, listUploadJobs, saveProject, saveUploadJob, type StoredProject, type UploadJob } from "./projectStorage";
 
 type Photo = { id: string; name: string; url: string; file: File; originalName: string; originalFile: File };
 type Station = { id: string; name: string; notes: string; photos: Photo[] };
@@ -26,22 +26,25 @@ export default function Home() {
   const [active, setActive] = useState("");
   const [stations, setStations] = useState<Station[]>([]);
   const [completed, setCompleted] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState("");
   const [uploadError, setUploadError] = useState("");
-  const [uploaded, setUploaded] = useState<{ folderUrl: string; shareUrl: string; warnings: string[] } | null>(null);
+  const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const [editingPhoto, setEditingPhoto] = useState<Photo | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
   const openedLink = useRef(false);
   const completingUpload = useRef(false);
+  const uploadWorkerRunning = useRef(false);
   const skipRestoredProjectSync = useRef(false);
   const current = stations.find((station) => station.id === active);
   const totalPhotos = stations.reduce((total, station) => total + station.photos.length, 0);
   const connected = Boolean(account);
+  const currentUploadJob = uploadJobs.find((job) => job.projectId === projectId);
+  const pendingUploadJobs = uploadJobs.filter((job) => job.status !== "complete");
 
   useEffect(() => {
     navigator.storage?.persist?.().catch(() => undefined);
     currentMicrosoftAccount().then((value) => { setAccount(value); if (value) listOneDriveProjects(value).then(setCloudProjects).catch(() => undefined); }).catch(() => undefined);
     listProjects().then((projects) => { setSavedProjects(projects); setLocalStatus("Saved on this device"); }).catch(() => setLocalStatus("Device save unavailable"));
+    listUploadJobs().then(setUploadJobs).catch(() => undefined);
   }, []);
   useEffect(() => {
     const linkedId = new URLSearchParams(window.location.search).get("project");
@@ -81,20 +84,146 @@ export default function Home() {
     }, 20000);
     return () => window.clearTimeout(timer);
   }, [account, projectId, surveyName, active, stations]);
+  useEffect(() => {
+    if (!account) return;
+    const wakeQueue = () => {
+      if (document.visibilityState === "visible" || navigator.onLine) void runUploadQueue(account);
+    };
+    wakeQueue();
+    window.addEventListener("online", wakeQueue);
+    window.addEventListener("focus", wakeQueue);
+    document.addEventListener("visibilitychange", wakeQueue);
+    const timer = window.setInterval(wakeQueue, 15000);
+    return () => {
+      window.removeEventListener("online", wakeQueue);
+      window.removeEventListener("focus", wakeQueue);
+      document.removeEventListener("visibilitychange", wakeQueue);
+      window.clearInterval(timer);
+    };
+  }, [account]);
 
   const connectMicrosoft = async () => {
     setUploadError("");
-    try { const signedIn = await signInMicrosoft(); setAccount(signedIn); setCloudProjects(await listOneDriveProjects(signedIn)); }
-    catch (error) { setUploadError(error instanceof Error ? error.message : "Microsoft sign-in did not finish."); }
+    try { const signedIn = await signInMicrosoft(); setAccount(signedIn); setCloudProjects(await listOneDriveProjects(signedIn)); return signedIn; }
+    catch (error) { setUploadError(error instanceof Error ? error.message : "Microsoft sign-in did not finish."); return null; }
   };
 
-  const uploadSurvey = async () => {
-    if (!account) { await connectMicrosoft(); return; }
+  async function runUploadQueue(activeAccount: AccountInfo) {
+    if (uploadWorkerRunning.current) return;
+    const jobs = await listUploadJobs();
+    const now = Date.now();
+    const job = jobs.find((candidate) => candidate.status !== "complete" && candidate.nextAttemptAt <= now);
+    if (!job) { setUploadJobs(jobs); return; }
+
+    uploadWorkerRunning.current = true;
     completingUpload.current = true;
-    setUploadError(""); setUploadStatus("Preparing your OneDrive folders…");
-    try { setUploaded(await uploadSurveyToOneDrive(account, surveyName, stations, setUploadStatus, projectId)); setUploadStatus(""); }
-    catch (error) { setUploadStatus(""); setUploadError(`${error instanceof Error ? error.message : "The OneDrive upload could not be completed."} Your walkthrough is still saved and safe. You can close this message and try again.`); }
-    finally { completingUpload.current = false; }
+    job.status = "uploading";
+    job.progress = "Preparing background upload…";
+    job.error = "";
+    job.updatedAt = now;
+    await saveUploadJob(job);
+    setUploadJobs(await listUploadJobs());
+    try {
+      const project = await getProject(job.projectId);
+      if (!project) throw new Error("The saved survey is no longer available on this device.");
+      const completedFiles = new Set(job.completedFiles);
+      let checkpoint = Promise.resolve();
+      let lastProgressPaint = 0;
+      const result = await uploadSurveyToOneDrive(
+        activeAccount,
+        project.name,
+        project.stations,
+        (message) => {
+          job.progress = message;
+          const paintNow = Date.now();
+          if (paintNow - lastProgressPaint > 250) {
+            lastProgressPaint = paintNow;
+            setUploadJobs((current) => current.map((item) => item.id === job.id ? { ...job } : item));
+          }
+        },
+        project.id,
+        {
+          rootId: job.folderId,
+          completedFileKeys: job.completedFiles,
+          retryUntilComplete: true,
+          onRootReady: async (root) => {
+            if (job.folderId && job.folderId !== root.id) {
+              completedFiles.clear();
+              job.completedFiles.length = 0;
+            }
+            job.folderId = root.id;
+            job.folderUrl = root.webUrl;
+            checkpoint = checkpoint.then(async () => {
+              job.updatedAt = Date.now();
+              await saveUploadJob(job);
+            });
+            await checkpoint;
+          },
+          onFileUploaded: async (key) => {
+            completedFiles.add(key);
+            job.completedFiles = [...completedFiles];
+            checkpoint = checkpoint.then(async () => {
+              job.updatedAt = Date.now();
+              await saveUploadJob(job);
+            });
+            await checkpoint;
+          },
+        },
+      );
+      job.status = "complete";
+      job.progress = "Upload complete";
+      job.error = "";
+      job.folderId = result.rootId;
+      job.folderUrl = result.folderUrl;
+      job.shareUrl = result.shareUrl;
+      job.warnings = result.warnings;
+      job.nextAttemptAt = 0;
+      job.updatedAt = Date.now();
+      await saveUploadJob(job);
+    } catch (error) {
+      job.attempts += 1;
+      const retryDelay = Math.min(5 * 60_000, 5_000 * (2 ** Math.min(job.attempts - 1, 6)));
+      job.status = "retrying";
+      job.nextAttemptAt = Date.now() + retryDelay;
+      job.error = error instanceof Error ? error.message : "The upload was interrupted.";
+      job.progress = navigator.onLine ? `Retrying automatically in ${Math.ceil(retryDelay / 1000)} seconds` : "Waiting for an internet connection";
+      job.updatedAt = Date.now();
+      await saveUploadJob(job);
+    } finally {
+      completingUpload.current = false;
+      uploadWorkerRunning.current = false;
+      setUploadJobs(await listUploadJobs());
+      window.setTimeout(() => runUploadQueue(activeAccount), 250);
+    }
+  }
+
+  const uploadSurvey = async () => {
+    const activeAccount = account ?? await connectMicrosoft();
+    if (!activeAccount || !projectId || !surveyName) return;
+    setUploadError("");
+    const saved = { id: projectId, name: surveyName, activeStationId: active, stations: stations.map((station) => ({ ...station, photos: station.photos.map(({ url: _url, ...photo }) => photo) })), updatedAt: Date.now() };
+    await saveProject(saved);
+    const existing = (await listUploadJobs()).find((job) => job.projectId === projectId);
+    const job: UploadJob = {
+      id: existing?.id ?? `survey-${projectId}`,
+      projectId,
+      projectName: surveyName,
+      status: "queued",
+      attempts: existing?.attempts ?? 0,
+      nextAttemptAt: 0,
+      progress: "Queued for OneDrive",
+      error: "",
+      folderId: existing?.folderId,
+      folderUrl: existing?.folderUrl,
+      shareUrl: existing?.shareUrl,
+      warnings: [],
+      completedFiles: existing?.completedFiles ?? [],
+      updatedAt: Date.now(),
+    };
+    await saveUploadJob(job);
+    setUploadJobs(await listUploadJobs());
+    setCompleted(false);
+    void runUploadQueue(activeAccount);
   };
 
   const createSurvey = () => {
@@ -104,7 +233,7 @@ export default function Home() {
   };
   const openProject = (project: StoredProject) => {
     const restored = project.stations.map((station) => ({ ...station, photos: station.photos.map((photo) => normalizePhoto(photo)) }));
-    skipRestoredProjectSync.current = true; setProjectId(project.id); setSurveyName(project.name); setStations(restored); setActive(project.activeStationId || restored[0]?.id || ""); setUploaded(null);
+    skipRestoredProjectSync.current = true; setProjectId(project.id); setSurveyName(project.name); setStations(restored); setActive(project.activeStationId || restored[0]?.id || "");
   };
   const openCloudProject = async (project: CloudProjectSummary) => {
     if (!account) return;
@@ -155,6 +284,7 @@ export default function Home() {
       {savedProjects.length > 0 && <section className="saved-projects"><div><b>Saved projects</b><span>Reopen a survey and keep working.</span></div>{savedProjects.map((project) => <article key={project.id}><button className="saved-open" onClick={() => openProject(project)}><FolderOpen size={20}/><span><b>{project.name}</b><small>{project.stations.length} stations · {project.stations.reduce((sum, station) => sum + station.photos.length, 0)} photos · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button><button className="saved-delete" aria-label={`Delete ${project.name}`} onClick={() => removeProject(project)}><Trash2 size={17}/></button></article>)}</section>}
       {connected && cloudProjects.some((project) => !savedProjects.some((local) => local.id === project.id)) && <section className="saved-projects cloud-projects"><div><b>From OneDrive</b><span>Projects saved on your other devices.</span></div>{cloudProjects.filter((project) => !savedProjects.some((local) => local.id === project.id)).map((project) => <article key={project.id}><button className="saved-open" onClick={() => openCloudProject(project)}><Cloud size={20}/><span><b>{project.name}</b><small>{project.stationCount} stations · {project.photoCount} photos · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button></article>)}</section>}
       {cloudStatus && !surveyName && <p className="cloud-home-status">{cloudStatus}</p>}
+      {pendingUploadJobs.length > 0 && <section className="saved-projects upload-queue-home"><div><b>OneDrive upload queue</b><span>Uploads resume automatically while Fieldnote is active.</span></div>{pendingUploadJobs.map((job) => <article key={job.id}><div className="queued-project"><Cloud size={20}/><span><b>{job.projectName}</b><small>{job.progress}</small></span></div></article>)}</section>}
       <div className="promise"><span><Check size={17}/>Works on your phone</span><span><Check size={17}/>Original photos preserved</span><span><Check size={17}/>Ready for OneDrive</span></div>
     </main><footer><span>Built for the walk-through.</span><span>iPhone · Android · Desktop</span></footer>
   </div>;
@@ -167,9 +297,54 @@ export default function Home() {
       <div className="photo-grid">{current?.photos.map((photo, photoIndex) => { const displayName = numberedPhotoName(current.name, photoIndex, photo.file !== photo.originalFile); return <article className="photo" key={photo.id}><button className="photo-preview" onClick={() => editPhoto(photo, current.name, photoIndex)}><PhotoImage file={photo.file} alt={displayName}/><span><PenLine size={15}/>Annotate</span></button><div><span>{displayName}</span><button aria-label={`Annotate ${displayName}`} title="Add measurements" onClick={() => editPhoto(photo, current.name, photoIndex)}><PenLine size={16}/></button></div></article>; })}{!current?.photos.length && <div className="photo-empty"><ImagePlus size={27}/><span>Photos added here will be organized in<br/><b>{surveyName} / {current?.name}</b></span></div>}</div>
       <div className="notes"><label htmlFor="notes">Field notes <small>optional</small></label><textarea id="notes" value={current?.notes ?? ""} onChange={(event) => setNotes(event.target.value)} placeholder="Add observations, measurements, or follow-up items…"/><span>Notes are saved as you type.</span></div><button className="next-station" onClick={nextStation}><span><Check size={18}/></span><div><b>Next station</b><small>Save this station and move on</small></div><Plus size={20}/></button></section>
     </main>
-    <aside className="station-tools"><h3>Walk-through progress</h3><p>Name the station, add every photo you need, then use Next station.</p><div className="progress-number"><b>{stations.length}</b><span>stations visited</span></div><div className="tool-note"><Upload size={18}/><span><b>Upload queue</b><br/>{totalPhotos ? `${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} ready to upload` : "No photos yet"}</span></div></aside>
+    <aside className="station-tools">
+      <h3>Walk-through progress</h3>
+      <p>Name the station, add every photo you need, then use Next station.</p>
+      <div className="progress-number"><b>{stations.length}</b><span>stations visited</span></div>
+      <div className={`tool-note upload-job ${currentUploadJob?.status ?? "idle"}`}>
+        <Upload size={18}/><span><b>OneDrive upload</b><br/>
+          {currentUploadJob?.status === "complete"
+            ? "Complete"
+            : currentUploadJob
+              ? currentUploadJob.progress
+              : totalPhotos ? `${totalPhotos} photo${totalPhotos === 1 ? "" : "s"} ready` : "No photos yet"}
+        </span>
+      </div>
+      {currentUploadJob?.status === "complete" && currentUploadJob.folderUrl && <a className="upload-folder-link" href={currentUploadJob.folderUrl} target="_blank" rel="noreferrer">Open OneDrive folder</a>}
+      {currentUploadJob?.status === "retrying" && <small className="upload-retry-note">{currentUploadJob.error}</small>}
+    </aside>
     {editingPhoto && <PhotoAnnotator photoUrl={editingPhoto.url} photoName={editingPhoto.name} onCancel={closeAnnotator} onSave={saveAnnotatedPhoto}/>}
-    {completed && <div className="completion-backdrop" role="dialog" aria-modal="true" aria-labelledby="complete-title"><section className="completion"><button className="completion-close" onClick={() => setCompleted(false)}>×</button><div className="complete-check"><Check size={25}/></div><div className="eyebrow">SURVEY READY</div><h2 id="complete-title">Your OneDrive folders</h2><p>Each station opens directly to all finished pictures, including annotated versions. Every camera original stays preserved in the Originals folder.</p><div className="folder-tree"><b><FolderOpen size={18}/>{surveyName}</b>{stations.map((station, index) => <div key={station.id}><strong><FolderOpen size={17}/>{station.name.trim() || `Station ${index + 1}`}</strong>{station.photos.length > 0 && <span><ImagePlus size={15}/>All pictures ({station.photos.length})</span>}{station.photos.length > 0 && <span><FolderOpen size={15}/>Originals ({station.photos.length})</span>}<span><PenLine size={15}/>Notes.txt</span></div>)}</div>{uploaded ? <><div className={uploaded.warnings.length ? "upload-success upload-partial" : "upload-success"}><Check size={20}/><b>{uploaded.warnings.length ? "Upload finished with skipped photos" : "Survey uploaded"}</b><a href={uploaded.folderUrl} target="_blank" rel="noreferrer">Open folder in OneDrive</a><button onClick={() => navigator.clipboard.writeText(uploaded.shareUrl)}><Share2 size={16}/>Copy team sharing link</button></div>{uploaded.warnings.length > 0 && <div className="upload-warnings" role="alert"><b>{uploaded.warnings.length} photo{uploaded.warnings.length === 1 ? "" : "s"} could not be read or uploaded</b><p>The rest of the survey was uploaded. Keep this project on your phone and try again after freeing storage or reconnecting.</p><ul>{uploaded.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul><button className="primary" onClick={() => setUploaded(null)}>Retry skipped photos</button></div>}</> : <button className="primary complete-action" disabled={Boolean(uploadStatus)} onClick={uploadSurvey}><Cloud size={18}/>{uploadStatus || (connected ? "Upload survey to OneDrive" : "Sign in with Microsoft to upload")}</button>}{uploadError && <p className="upload-error" role="alert">{uploadError}</p>}<small className="complete-help">{connected ? `Connected as ${account?.username}` : "Microsoft will ask you to approve access to files in your OneDrive."}</small></section></div>}
+    {completed && <div className="completion-backdrop" role="dialog" aria-modal="true" aria-labelledby="complete-title">
+      <section className="completion">
+        <button className="completion-close" onClick={() => setCompleted(false)}>×</button>
+        <div className="complete-check"><Check size={25}/></div>
+        <div className="eyebrow">SURVEY READY</div>
+        <h2 id="complete-title">Your OneDrive folders</h2>
+        <p>Each station opens directly to all finished pictures, including annotated versions. Every camera original stays preserved in the Originals folder.</p>
+        <div className="folder-tree">
+          <b><FolderOpen size={18}/>{surveyName}</b>
+          {stations.map((station, index) => <div key={station.id}>
+            <strong><FolderOpen size={17}/>{station.name.trim() || `Station ${index + 1}`}</strong>
+            {station.photos.length > 0 && <span><ImagePlus size={15}/>All pictures ({station.photos.length})</span>}
+            {station.photos.length > 0 && <span><FolderOpen size={15}/>Originals ({station.photos.length})</span>}
+            <span><PenLine size={15}/>Notes.txt</span>
+          </div>)}
+        </div>
+        {currentUploadJob?.status === "complete" ? <div className="upload-success">
+          <Check size={20}/><b>Survey uploaded</b>
+          {currentUploadJob.folderUrl && <a href={currentUploadJob.folderUrl} target="_blank" rel="noreferrer">Open folder in OneDrive</a>}
+          {currentUploadJob.shareUrl && <button onClick={() => navigator.clipboard.writeText(currentUploadJob.shareUrl!)}><Share2 size={16}/>Copy team sharing link</button>}
+          <button onClick={uploadSurvey}><Upload size={16}/>Upload new changes</button>
+        </div> : currentUploadJob ? <div className="upload-queued">
+          <Cloud size={20}/><div><b>{currentUploadJob.status === "retrying" ? "Upload will retry automatically" : "Background upload is running"}</b><p>{currentUploadJob.progress}</p></div>
+          {currentUploadJob.status === "retrying" && <button className="primary" onClick={uploadSurvey}>Retry now</button>}
+        </div> : <button className="primary complete-action" onClick={uploadSurvey}>
+          <Cloud size={18}/>{connected ? "Start background upload" : "Sign in with Microsoft to upload"}
+        </button>}
+        {uploadError && <p className="upload-error" role="alert">{uploadError}</p>}
+        <small className="complete-help">{connected ? "You can close this window and keep working. Fieldnote resumes interrupted uploads whenever the app is active." : "Microsoft will ask you to approve access to files in your OneDrive."}</small>
+      </section>
+    </div>}
   </div>;
 }
 function Brand() { return <a className="brand" href="#"><span><MapPin size={21}/></span>fieldnote<i>.</i></a>; }
@@ -185,6 +360,3 @@ function PhotoImage({ file, alt }: { file: File; alt: string }) {
   }, [file]);
   return src ? <img src={src} alt={alt}/> : <span className="photo-unavailable">Photo unavailable</span>;
 }
-
-
-
