@@ -18,6 +18,8 @@ try {
   [System.IO.File]::WriteAllText($versionPath, "{`"buildId`":`"$buildId`"}", [System.Text.UTF8Encoding]::new($false))
   & node node_modules/next/dist/bin/next build
   if ($LASTEXITCODE -ne 0) { throw "Azure build failed." }
+  [System.IO.File]::WriteAllText((Join-Path $projectRoot "out/version.json"), "{`"buildId`":`"$buildId`"}", [System.Text.UTF8Encoding]::new($false))
+  Copy-Item -LiteralPath (Join-Path $projectRoot "public/staticwebapp.config.json") -Destination (Join-Path $projectRoot "out/staticwebapp.config.json") -Force
   $token = & $az staticwebapp secrets list --resource-group $ResourceGroup --name $AppName --query properties.apiKey -o tsv
   if ($LASTEXITCODE -ne 0 -or -not $token) { throw "Azure deployment token could not be loaded." }
   & (Join-Path $projectRoot "node_modules/.bin/swa.cmd") deploy out --api-location api --api-language node --api-version 20 --deployment-token $token --env production
