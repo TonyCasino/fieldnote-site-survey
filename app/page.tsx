@@ -12,6 +12,24 @@ import { deleteProject, getProject, listProjects, listUploadJobs, saveProject, s
 type Photo = { id: string; name: string; url: string; file: File; originalName: string; originalFile: File };
 type Station = { id: string; name: string; notes: string; photos: Photo[] };
 const id = () => Math.random().toString(36).slice(2, 9);
+const loadedBuildId = process.env.NEXT_PUBLIC_FIELDNOTE_BUILD_ID;
+
+async function reloadIfBuildIsStale(onUpdating?: () => void) {
+  if (!loadedBuildId) return false;
+  try {
+    const response = await fetch(`/version.json?checked=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return false;
+    const version = await response.json() as { buildId?: string };
+    if (!version.buildId || version.buildId === loadedBuildId) return false;
+    onUpdating?.();
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("appVersion", version.buildId);
+    window.location.replace(nextUrl.toString());
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export default function Home() {
   const [surveyName, setSurveyName] = useState("");
@@ -45,6 +63,20 @@ export default function Home() {
     currentMicrosoftAccount().then((value) => { setAccount(value); if (value) listOneDriveProjects(value).then(setCloudProjects).catch(() => undefined); }).catch(() => undefined);
     listProjects().then((projects) => { setSavedProjects(projects); setLocalStatus("Saved on this device"); }).catch(() => setLocalStatus("Device save unavailable"));
     listUploadJobs().then(setUploadJobs).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    const checkVersion = () => {
+      if (document.visibilityState === "visible") void reloadIfBuildIsStale(() => setCloudStatus("Updating Fieldnote…"));
+    };
+    checkVersion();
+    window.addEventListener("focus", checkVersion);
+    document.addEventListener("visibilitychange", checkVersion);
+    const timer = window.setInterval(checkVersion, 60_000);
+    return () => {
+      window.removeEventListener("focus", checkVersion);
+      document.removeEventListener("visibilitychange", checkVersion);
+      window.clearInterval(timer);
+    };
   }, []);
   useEffect(() => {
     const linkedId = new URLSearchParams(window.location.search).get("project");
@@ -198,6 +230,7 @@ export default function Home() {
   }
 
   const uploadSurvey = async () => {
+    if (await reloadIfBuildIsStale(() => setCloudStatus("Updating Fieldnote before upload…"))) return;
     const activeAccount = account ?? await connectMicrosoft();
     if (!activeAccount || !projectId || !surveyName) return;
     setUploadError("");
