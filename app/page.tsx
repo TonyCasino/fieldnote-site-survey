@@ -46,6 +46,8 @@ export default function Home() {
   const [completed, setCompleted] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
+  const [showUploads, setShowUploads] = useState(false);
+  const [copiedUploadId, setCopiedUploadId] = useState("");
   const [editingPhoto, setEditingPhoto] = useState<Photo | null>(null);
   const photoInput = useRef<HTMLInputElement>(null);
   const openedLink = useRef(false);
@@ -310,21 +312,59 @@ export default function Home() {
   const editPhoto = (photo: Photo, stationName: string, photoIndex: number) => setEditingPhoto({ ...photo, name: numberedPhotoName(stationName, photoIndex, false), url: URL.createObjectURL(photo.file) });
   const closeAnnotator = () => { if (editingPhoto?.url) URL.revokeObjectURL(editingPhoto.url); setEditingPhoto(null); };
 
+  const refreshUploads = async () => setUploadJobs(await listUploadJobs());
+  const continueUploadJob = async (job: UploadJob) => {
+    if (!account) return;
+    const readyJob = { ...job, status: "queued" as const, nextAttemptAt: 0, progress: "Queued to continue", error: "", updatedAt: Date.now() };
+    await saveUploadJob(readyJob);
+    setUploadJobs(await listUploadJobs());
+    void runUploadQueue(account);
+  };
+  const copyUploadLink = async (job: UploadJob) => {
+    if (!job.shareUrl) return;
+    await navigator.clipboard.writeText(job.shareUrl);
+    setCopiedUploadId(job.id);
+    window.setTimeout(() => setCopiedUploadId((current) => current === job.id ? "" : current), 2500);
+  };
+
+  if (showUploads) return <div className="start upload-center">
+    <header className="start-header"><Brand/><button className="connect" onClick={() => setShowUploads(false)}><ChevronLeft size={17}/>{surveyName ? "Back to survey" : "Back to projects"}</button></header>
+    <main>
+      <div className="upload-center-title"><div><div className="eyebrow">ONEDRIVE</div><h1>Uploads</h1><p>See what is running, what needs attention, and open completed survey folders.</p></div><button onClick={refreshUploads}><Upload size={17}/>Refresh status</button></div>
+      {pendingUploadJobs.length > 0 && <div className="upload-active-note"><Cloud size={20}/><div><b>{pendingUploadJobs.length} upload{pendingUploadJobs.length === 1 ? "" : "s"} still in progress</b><span>Keep this Safari tab open. Interrupted uploads resume from the last confirmed file when Fieldnote is active again.</span></div></div>}
+      <section className="upload-list">
+        {uploadJobs.length === 0 ? <div className="upload-empty"><Upload size={28}/><b>No uploads yet</b><span>Complete a survey and choose Start background upload.</span></div> : uploadJobs.map((job) => <article className={`upload-card ${job.status}`} key={job.id}>
+          <div className="upload-card-heading"><div className="upload-card-icon">{job.status === "complete" ? <Check size={20}/> : <Cloud size={20}/>}</div><div><h2>{job.projectName}</h2><span>Updated {new Date(job.updatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span></div><strong>{job.status === "complete" ? "Complete" : job.status === "retrying" ? "Retrying" : job.status === "uploading" ? "Uploading" : job.status === "needs-sign-in" ? "Sign in needed" : "Queued"}</strong></div>
+          <p className="upload-card-progress">{job.progress}</p>
+          {job.completedFiles.length > 0 && job.status !== "complete" && <small>{job.completedFiles.length} files confirmed in OneDrive</small>}
+          {job.error && job.status !== "complete" && <p className="upload-card-error">{job.error}</p>}
+          {job.warnings.length > 0 && <p className="upload-card-warning">Completed with {job.warnings.length} warning{job.warnings.length === 1 ? "" : "s"}.</p>}
+          <div className="upload-card-actions">
+            {job.status === "complete" && job.folderUrl && <a href={job.folderUrl} target="_blank" rel="noreferrer"><FolderOpen size={16}/>Open OneDrive folder</a>}
+            {job.status === "complete" && job.shareUrl && <button onClick={() => copyUploadLink(job)}><Share2 size={16}/>{copiedUploadId === job.id ? "Link copied" : "Copy sharing link"}</button>}
+            {job.status !== "complete" && account && <button onClick={() => continueUploadJob(job)}><Upload size={16}/>{job.status === "retrying" ? "Retry now" : "Continue upload"}</button>}
+            {job.status !== "complete" && !account && <button onClick={connectMicrosoft}><Cloud size={16}/>Sign in to continue</button>}
+          </div>
+        </article>)}
+      </section>
+    </main>
+  </div>;
+
   if (!surveyName) return <div className="start">
-    <header className="start-header"><Brand/><button className="connect" onClick={connectMicrosoft}><Cloud size={17}/>{connected ? account?.username : "Sign in with Microsoft"}</button></header>
+    <header className="start-header"><Brand/><div className="start-actions"><button className="uploads-nav" onClick={() => setShowUploads(true)}><Upload size={17}/>Uploads{pendingUploadJobs.length > 0 && <span>{pendingUploadJobs.length}</span>}</button><button className="connect" onClick={connectMicrosoft}><Cloud size={17}/>{connected ? account?.username : "Sign in with Microsoft"}</button></div></header>
     <main><div className="eyebrow">SITE SURVEY TOOL</div><h1>Document the site<br/><em>while you’re there.</em></h1><p className="lead">Capture photos by station, add field notes, then send a clean, organized survey to OneDrive.</p>
       {creating ? <form className="create-box" onSubmit={(event) => { event.preventDefault(); createSurvey(); }}><label htmlFor="site">What site are you surveying?</label><input autoFocus id="site" value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="e.g. Northside Warehouse"/><div><button type="button" onClick={() => setCreating(false)}>Cancel</button><button className="primary" type="submit">Create survey <Plus size={17}/></button></div></form> : <button className="primary large" onClick={() => setCreating(true)}><Plus size={18}/>Start a site survey</button>}
       {savedProjects.length > 0 && <section className="saved-projects"><div><b>Saved projects</b><span>Reopen a survey and keep working.</span></div>{savedProjects.map((project) => <article key={project.id}><button className="saved-open" onClick={() => openProject(project)}><FolderOpen size={20}/><span><b>{project.name}</b><small>{project.stations.length} stations · {project.stations.reduce((sum, station) => sum + station.photos.length, 0)} photos · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button><button className="saved-delete" aria-label={`Delete ${project.name}`} onClick={() => removeProject(project)}><Trash2 size={17}/></button></article>)}</section>}
       {connected && cloudProjects.some((project) => !savedProjects.some((local) => local.id === project.id)) && <section className="saved-projects cloud-projects"><div><b>From OneDrive</b><span>Projects saved on your other devices.</span></div>{cloudProjects.filter((project) => !savedProjects.some((local) => local.id === project.id)).map((project) => <article key={project.id}><button className="saved-open" onClick={() => openCloudProject(project)}><Cloud size={20}/><span><b>{project.name}</b><small>{project.stationCount} stations · {project.photoCount} photos · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button></article>)}</section>}
       {cloudStatus && !surveyName && <p className="cloud-home-status">{cloudStatus}</p>}
-      {pendingUploadJobs.length > 0 && <section className="saved-projects upload-queue-home"><div><b>OneDrive upload queue</b><span>Uploads resume automatically while Fieldnote is active.</span></div>{pendingUploadJobs.map((job) => <article key={job.id}><div className="queued-project"><Cloud size={20}/><span><b>{job.projectName}</b><small>{job.progress}</small></span></div></article>)}</section>}
+      {pendingUploadJobs.length > 0 && <section className="saved-projects upload-queue-home"><div><b>OneDrive upload queue</b><button className="queue-view" onClick={() => setShowUploads(true)}>View uploads</button></div>{pendingUploadJobs.map((job) => <article key={job.id}><div className="queued-project"><Cloud size={20}/><span><b>{job.projectName}</b><small>{job.progress}</small></span></div></article>)}</section>}
       <div className="promise"><span><Check size={17}/>Works on your phone</span><span><Check size={17}/>Original photos preserved</span><span><Check size={17}/>Ready for OneDrive</span></div>
     </main><footer><span>Built for the walk-through.</span><span>iPhone · Android · Desktop</span></footer>
   </div>;
 
   return <div className="app-shell">
     <aside className="rail"><Brand/><button className="new-survey" onClick={() => { setProjectId(""); setSurveyName(""); setStations([]); }}><Plus size={18}/>New survey</button><div className="nav-title">WALK-THROUGH</div><button className="nav-item selected"><FolderOpen size={18}/>{surveyName}</button><div className="station-list">{stations.map((station, index) => <button key={station.id} className={station.id === active ? "station active" : "station"} onClick={() => setActive(station.id)}><span>{String(index + 1).padStart(2, "0")}</span>{station.name || "Name this station"}<small>{station.photos.length}</small></button>)}</div><div className="onedrive"><Cloud size={20}/><div><b>{connected ? "Connected to OneDrive" : "Offline workspace"}</b><p>{connected ? "Ready to upload" : "Connect when you’re ready"}</p></div></div></aside>
-    <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1><small className="local-save-status">{localStatus}</small></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? cloudStatus || "Saved to OneDrive" : localStatus}</span><button className="save-now" onClick={saveNow}><Check size={17}/>Save now</button><button className="outline" onClick={connectMicrosoft}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" onClick={() => setCompleted(true)}><Share2 size={17}/>Complete & share</button></div></header>
+    <main className="workspace"><header><div><button className="back" onClick={() => setSurveyName("")}><ChevronLeft size={18}/>Surveys</button><h1>{surveyName}</h1><small className="local-save-status">{localStatus}</small></div><div className="header-actions"><span className={connected ? "sync good" : "sync"}><i/>{connected ? cloudStatus || "Saved to OneDrive" : localStatus}</span><button className="save-now uploads-nav" onClick={() => setShowUploads(true)}><Upload size={17}/>Uploads{pendingUploadJobs.length > 0 && <span>{pendingUploadJobs.length}</span>}</button><button className="save-now" onClick={saveNow}><Check size={17}/>Save now</button><button className="outline" onClick={connectMicrosoft}>{connected ? <Check size={17}/> : <Cloud size={17}/>}{connected ? "Connected" : "Connect OneDrive"}</button><button className="primary" onClick={() => setCompleted(true)}><Share2 size={17}/>Complete & share</button></div></header>
       <section className="station-area"><label className="mobile-station-picker">View station<select value={active} onChange={(event) => setActive(event.target.value)}>{stations.map((station, index) => <option key={station.id} value={station.id}>{index + 1}. {station.name || "Unnamed station"} ({station.photos.length} photos)</option>)}</select></label><div className="station-title"><div><div className="eyebrow">STATION {String(stations.findIndex((station) => station.id === active) + 1).padStart(2, "0")}</div><label className="station-name-label" htmlFor="station-name">Where are you?</label><input key={active} autoFocus id="station-name" className="station-name" value={current?.name ?? ""} onChange={(event) => setStationName(event.target.value)} placeholder="Type the station name"/></div><span>{current?.photos.length ?? 0} photos</span></div>
       <div className="capture-card"><div><Camera size={26}/><div><h3>Capture the condition</h3><p>Use your camera or add photos from this device. Originals stay with this station.</p></div></div><button className="primary" onClick={() => photoInput.current?.click()}><Camera size={18}/>Add photos</button><input ref={photoInput} type="file" accept="image/*" capture="environment" multiple onChange={(event) => addPhotos(event.target.files)}/></div>
       <div className="photo-grid">{current?.photos.map((photo, photoIndex) => { const displayName = numberedPhotoName(current.name, photoIndex, photo.file !== photo.originalFile); return <article className="photo" key={photo.id}><button className="photo-preview" onClick={() => editPhoto(photo, current.name, photoIndex)}><PhotoImage file={photo.file} alt={displayName}/><span><PenLine size={15}/>Annotate</span></button><div><span>{displayName}</span><button aria-label={`Annotate ${displayName}`} title="Add measurements" onClick={() => editPhoto(photo, current.name, photoIndex)}><PenLine size={16}/></button></div></article>; })}{!current?.photos.length && <div className="photo-empty"><ImagePlus size={27}/><span>Photos added here will be organized in<br/><b>{surveyName} / {current?.name}</b></span></div>}</div>
